@@ -3,6 +3,7 @@
 #include <zod_schirm.h>
 #include <zod_pack.h>
 #include <stdio.h>
+#include <string.h>   /* memcmp, memcpy: Sortierspeicher */
 #ifdef ZOD_ALLOC_PROBE
 extern "C" void zod_alloc_report(const char *tag);
 #endif
@@ -24,6 +25,10 @@ extern "C" int  zod_roto_quant_get(void);   /* fest verdrahtet, nur zum Melden *
 #endif
 
 using namespace COMMON;
+
+/* Warp F3, Steinkoepfe (Definitionen bei RenderObjects) */
+static int zod_rockbake_modus(void);
+extern "C" void zod_overdraw_begin(void);
 
 void selection_info::DeleteObject(ZObject *obj)
 {
@@ -1864,6 +1869,90 @@ extern "C" void zod_render_sections_report(long frames)
 	}
 }
 
+/* --- Aufteilung des Postens `spiel` (ZPlayer::ProcessGame), Warp F3 -------
+ *
+ * `spiel` ist auf orig07 rund 8 ms je Bild und war bisher eine Zahl. Gleiche
+ * Technik wie beim Zeichnen: eine Uhrablesung je Abschnittsgrenze, der
+ * Messpunkt wird als Beginn des naechsten fortgeschrieben. */
+enum
+{
+	PSEC_MUSIK = 0,     /* ZMusicEngine::Process                          */
+	PSEC_WARNUNG,       /* ProcessVerbalWarnings                          */
+	PSEC_CURSOR,        /* cursor/Pcursor.Process                         */
+	PSEC_KOMPNACHR,     /* zcomp_msg.Process                              */
+	PSEC_HUD,           /* zhud.Process                                   */
+	PSEC_SORT,          /* Einfuegesortierung prender_olist               */
+	PSEC_SORT_KLEIN,    /* dieselbe fuer die drei kleinen Listen          */
+	PSEC_OBJEKT,        /* ProcessObject der Nicht-Kartenobjekte          */
+	PSEC_PROCESS,       /* Process aller Objekte                          */
+	PSEC_EFF_WEG,       /* Effekte loeschen                               */
+	PSEC_EFF,           /* Effekte Process                                */
+	PSEC_EFF_NEU,       /* neue Effekte uebernehmen                       */
+	PSEC_VOEGEL,        /* bird_list                                      */
+	PSEC_GUI,           /* gui_window, factory list, Hauptmenues          */
+	PSEC_KANONE,        /* SetPlaceCannonCords                            */
+	PSEC_SCROLL,        /* ProcessScroll + ProcessFocusCamerato           */
+	PSEC_MAX
+};
+
+static const char *zod_psec_name[PSEC_MAX] =
+{
+	"musik", "warnung", "cursor", "kompnachr", "hud", "sort", "sort_klein",
+	"objekt", "process", "eff_weg", "eff", "eff_neu", "voegel", "gui",
+	"kanone", "scroll"
+};
+
+static unsigned long zod_psec[PSEC_MAX];
+static unsigned long zod_psec_max[PSEC_MAX];
+static unsigned long zod_psec_mark = 0;
+static unsigned long zod_psec_takte = 0;
+static unsigned long zod_psec_n_alle = 0, zod_psec_n_mobil = 0, zod_psec_n_eff = 0;
+
+static inline void zod_psec_begin(void)
+{
+	if(!zod_time_measure) return;
+
+	zod_psec_takte++;
+	zod_psec_mark = zod_fineclock_ticks();
+}
+
+static inline void zod_psec_end(int slot)
+{
+	if(!zod_time_measure) return;
+
+	const unsigned long jetzt = zod_fineclock_ticks();
+	const unsigned long d = jetzt - zod_psec_mark;
+
+	zod_psec[slot] += d;
+	if(d > zod_psec_max[slot]) zod_psec_max[slot] = d;
+	zod_psec_mark = jetzt;
+}
+
+extern "C" void zod_game_sections_report(long frames)
+{
+	const unsigned long freq = zod_fineclock_freq();
+
+	/* freq / 1000 als Teiler -- unter 1000 waere es eine Division durch 0. */
+	if(freq < 1000 || frames <= 0 || !zod_psec_takte) return;
+
+	unsigned long summe = 0;
+
+	for(int i = 0; i < PSEC_MAX; i++)
+	{
+		const unsigned long us = (zod_psec[i] / frames) * 1000UL / (freq / 1000UL);
+		const unsigned long sp = (zod_psec_max[i] < 4000000UL)
+		       ? (zod_psec_max[i] * 1000UL / (freq / 1000UL))
+		       : ((zod_psec_max[i] / (freq / 1000UL)) * 1000UL);
+
+		summe += us;
+		ZLOG("  spiel.%s = %ld us, SPITZE %ld us\n", zod_psec_name[i], (long)us, (long)sp);
+	}
+
+	ZLOG("  spiel.SUMME = %ld us (muss `spiel` oben entsprechen)\n", (long)summe);
+	ZLOG("  spiel.Objekte = %ld in prender_olist, %ld Nicht-Kartenobjekte, %ld Effekte\n",
+	     (long)zod_psec_n_alle, (long)zod_psec_n_mobil, (long)zod_psec_n_eff);
+}
+
 void zod_time_report(double &render, double &flip, double &process, double &socket, long &frames)
 {
 	const unsigned long freq = zod_fineclock_freq();
@@ -2098,23 +2187,199 @@ void ZPlayer::PruefeMittelpunkte()
 	}
 }
 
+/* --- Sortierspeicher fuer die Zeichenreihenfolge (Warp F3) --------------
+ *
+ * Die Einfuegesortierung unten las je Bild fuer JEDES Objekt `loc.y` und
+ * `height_pix` -- rund 1000 Objekte auf orig07, verstreut auf der Halde,
+ * also ein Cache-Fehlgriff je Vergleich. Gemessen auf Amiga 2: 5,2 ms von
+ * 8,1 ms `spiel` (orig07), 28 von 40 ms (p08m01).
+ *
+ * Kartenobjekte bewegen sich nie. Ihr Schluessel wird deshalb EINMAL gelesen
+ * und in einem dichten Feld neben dem Zeiger gehalten; gelesen wird je Bild
+ * nur noch der Schluessel der beweglichen. Sortiert wird mit DERSELBEN
+ * stabilen Einfuegesortierung auf denselben Schluesseln -- das Ergebnis ist
+ * also dieselbe Reihenfolge, Element fuer Element.
+ *
+ * Der Speicher gilt nur, solange sich die Liste nicht geaendert hat
+ * (`ZOLists::version`, zusaetzlich Zeigervergleich). Sonst wird er aus der
+ * Liste neu aufgebaut -- das kostet genau so viel wie bisher.
+ *
+ * Nebenbei merkt er sich, wessen Process() leer ist (ORock, OMapObject),
+ * damit die Process-Schleife diese Aufrufe auslassen kann.
+ *
+ * `ZOD_SORTCACHE 0` = alter Weg, `2` = Speicher und je Bild nachpruefen,
+ * dass die gemerkten Schluessel stimmen. */
+struct zod_sortcache
+{
+	const void *besitzer;
+	unsigned long version;
+	vector<ZObject*> ptr;
+	vector<int> key;
+	vector<int> xs;              /* loc.x, nur fuer Steine gebraucht (fest) */
+	vector<unsigned char> art;   /* Bit 0: Schluessel fest, Bit 1: Process leer,
+	                                Bit 2: Stein, zeichnet nur in key-48 .. key */
+
+	zod_sortcache() : besitzer(0), version(0) {}
+};
+
+static zod_sortcache zod_sc[4];
+static int zod_sort_modus = -1;
+static unsigned long zod_sort_neu = 0, zod_sort_gemerkt = 0, zod_sort_falsch = 0;
+static unsigned long zod_sort_process_aus = 0;
+static unsigned long zod_cull_weg = 0, zod_cull_falsch = 0, zod_cull_bilder = 0;
+
+static int zod_sortcache_modus(void)
+{
+	if(zod_sort_modus < 0)
+	{
+		char buf[16];
+
+		zod_sort_modus = 1;
+		if(zod_env("ZOD_SORTCACHE", buf, sizeof(buf)))
+			zod_sort_modus = (buf[0] == '0') ? 0 : (buf[0] == '2') ? 2 : 1;
+
+		ZLOG("Sortierspeicher: %s\n", zod_sort_modus == 0 ? "aus" :
+		     zod_sort_modus == 1 ? "an" : "an, mit Pruefung");
+	}
+
+	return zod_sort_modus;
+}
+
+static inline bool zod_sortcache_gueltig(const zod_sortcache &c, const vector<ZObject*> &l,
+                                         const void *besitzer, unsigned long version)
+{
+	return c.besitzer == besitzer && c.version == version && c.ptr.size() == l.size() &&
+	       (l.empty() || memcmp(&c.ptr[0], &l[0], l.size() * sizeof(ZObject*)) == 0);
+}
+
+static void zod_sort_liste(vector<ZObject*> &l, zod_sortcache &c, const void *besitzer,
+                           unsigned long version)
+{
+	const size_t n = l.size();
+
+	if(!zod_sortcache_gueltig(c, l, besitzer, version))
+	{
+		c.ptr = l;
+		c.key.resize(n);
+		c.xs.resize(n);
+		c.art.resize(n);
+
+		for(size_t i = 0; i < n; i++)
+		{
+			ZObject *o = l[i];
+			unsigned char ot, oid;
+
+			int w, h;
+
+			int ox, oy;
+
+			o->GetObjectID(ot, oid);
+			o->GetDimensionsPixel(w, h);
+			o->GetCords(ox, oy);
+			c.key[i] = o->SortKey();
+			c.xs[i] = ox;
+			/* ORock::DoRender zeichnet drei Kacheln bei loc.y + 0/16/32, also
+			 * genau y .. y+48; mit height_pix 48 ist das key-48 .. key. */
+			c.art[i] = (unsigned char)((ot == MAP_ITEM_OBJECT ? 1 : 0) | (o->ProcessNoop() ? 2 : 0) |
+			           ((ot == MAP_ITEM_OBJECT && oid == ROCK_ITEM && h == 48) ? 4 : 0));
+		}
+
+		zod_sort_neu++;
+	}
+	else
+	{
+		for(size_t i = 0; i < n; i++)
+		{
+			if(!(c.art[i] & 1))
+				c.key[i] = c.ptr[i]->SortKey();
+			else if(zod_sort_modus == 2 && c.ptr[i]->SortKey() != c.key[i])
+			{
+				if(zod_sort_falsch < 8)
+					ZLOG("Sortierspeicher: Schluessel %d gemerkt, %d wirklich (ref_id %d)\n",
+					     c.key[i], c.ptr[i]->SortKey(), c.ptr[i]->GetRefID());
+				zod_sort_falsch++;
+				c.key[i] = c.ptr[i]->SortKey();
+			}
+		}
+
+		zod_sort_gemerkt++;
+	}
+
+	/* dieselbe Einfuegesortierung wie sort_objects_func: a vor b, wenn a < b */
+	ZObject **pp = n ? &c.ptr[0] : 0;
+	int *kk = n ? &c.key[0] : 0;
+	int *xx = n ? &c.xs[0] : 0;
+	unsigned char *aa = n ? &c.art[0] : 0;
+
+	for(size_t i = 1; i < n; i++)
+	{
+		ZObject *po = pp[i];
+		const int k = kk[i];
+		const int xv = xx[i];
+		const unsigned char a = aa[i];
+		size_t j = i;
+
+		while(j > 0 && k < kk[j - 1])
+		{
+			pp[j] = pp[j - 1];
+			kk[j] = kk[j - 1];
+			xx[j] = xx[j - 1];
+			aa[j] = aa[j - 1];
+			j--;
+		}
+
+		pp[j] = po;
+		kk[j] = k;
+		xx[j] = xv;
+		aa[j] = a;
+	}
+
+	if(n) memcpy(&l[0], pp, n * sizeof(ZObject*));
+
+	c.besitzer = besitzer;
+	c.version = version;
+}
+
+extern "C" void zod_sortcache_report(void)
+{
+	if(zod_sort_modus <= 0) return;
+
+	ZLOG("Sortierspeicher: %lu mal neu aufgebaut, %lu mal benutzt, %lu falsche Schluessel, %lu Process-Aufrufe gespart\n",
+	     zod_sort_neu, zod_sort_gemerkt, zod_sort_falsch, zod_sort_process_aus);
+	if(zod_cull_bilder)
+		ZLOG("Steine ausserhalb des Ausschnitts: %lu je Bild nicht gelesen, %lu haetten gezeichnet (muss 0 sein)\n",
+		     zod_cull_weg / zod_cull_bilder, zod_cull_falsch);
+}
+
 void ZPlayer::ProcessGame()
 {
 	double &the_time = ztime.ztime;
 	
 	//zmap.DoEffects(the_time);
 
+	zod_psec_begin();
+
 	ZMusicEngine::Process(object_list, zmap, our_team, fort_ref_id);
+
+	zod_psec_end(PSEC_MUSIK);
 
 	//fort under attack etc?
 	ProcessVerbalWarnings();
 
+	zod_psec_end(PSEC_WARNUNG);
+
 	cursor.Process(the_time);
 	Pcursor.Process(the_time);
 
+	zod_psec_end(PSEC_CURSOR);
+
     zcomp_msg.Process(COMMON::current_time());
 
+	zod_psec_end(PSEC_KOMPNACHR);
+
 	zhud.Process(the_time, object_list);
+
+	zod_psec_end(PSEC_HUD);
 		
 	/* Zeichenreihenfolge nach y. Einfuegesortierung statt std::sort:
 	 *
@@ -2130,6 +2395,17 @@ void ZPlayer::ProcessGame()
 	 * std::sort darf bei gleichem Schluessel die Reihenfolge von Bild zu Bild
 	 * willkuerlich aendern -- bei gleich hohen Objekten ist das eine
 	 * moegliche Flimmerquelle. */
+	if(zod_sortcache_modus())
+	{
+		zod_sort_liste(ols.prender_olist, zod_sc[0], &ols, ols.version);
+		zod_psec_end(PSEC_SORT);
+		zod_sort_liste(ols.prerender_olist, zod_sc[1], &ols, ols.version);
+		zod_sort_liste(ols.aftereffect_olist, zod_sc[2], &ols, ols.version);
+		zod_sort_liste(ols.prerender_band_olist, zod_sc[3], &ols, ols.version);
+		zod_psec_end(PSEC_SORT_KLEIN);
+	}
+	else
+	{
 	{
 		vector<ZObject*> &pol = ols.prender_olist;
 
@@ -2147,6 +2423,8 @@ void ZPlayer::ProcessGame()
 			pol[j] = obj;
 		}
 	}
+
+	zod_psec_end(PSEC_SORT);
 
 	/* Dieselbe Sortierung fuer die kleine Vorzeichnen-Liste. Sie ist eine
 	 * Teilmenge, und derselbe Schluessel liefert deshalb genau die relative
@@ -2176,6 +2454,9 @@ void ZPlayer::ProcessGame()
 		}
 	}
 
+	zod_psec_end(PSEC_SORT_KLEIN);
+	}
+
 	/* ProcessObject NUR fuer Nicht-Kartenobjekte, Process fuer alle.
 	 *
 	 * `ZObject::ProcessObject` macht vier Dinge, und fuer Kartenobjekte
@@ -2203,10 +2484,31 @@ void ZPlayer::ProcessGame()
 	    i!=ols.non_mapitem_olist.end(); i++)
 		(*i)->ProcessObject();
 
+	zod_psec_end(PSEC_OBJEKT);
+
+	/* Process fuer alle -- ausser denen, deren Process() leer ist (Warp F3,
+	 * siehe Sortierspeicher). Gilt nur, wenn der Speicher noch zur Liste
+	 * passt; ProcessObject oben aendert keine Liste, aber das wird nicht
+	 * angenommen, sondern geprueft. */
+	if(zod_sort_modus > 0 && zod_sortcache_gueltig(zod_sc[0], ols.prender_olist, &ols, ols.version))
+	{
+		const zod_sortcache &c = zod_sc[0];
+
+		for(size_t i = 0; i < c.ptr.size(); i++)
+		{
+			if(c.art[i] & 2) { zod_sort_process_aus++; continue; }
+			c.ptr[i]->Process();
+		}
+	}
+	else
  	for(vector<ZObject*>::iterator i=ols.prender_olist.begin(); i!=ols.prender_olist.end(); i++)
  		(*i)->Process();
 
 	if(zod_centercheck_an()) PruefeMittelpunkte();
+
+	zod_psec_end(PSEC_PROCESS);
+	zod_psec_n_alle  += (unsigned long)ols.prender_olist.size();
+	zod_psec_n_mobil += (unsigned long)ols.non_mapitem_olist.size();
 
 	//kill effects
 	//
@@ -2249,6 +2551,9 @@ void ZPlayer::ProcessGame()
 		if(zod_eff_frame > zod_eff_peak) zod_eff_peak = zod_eff_frame;
 	}
 
+	zod_psec_end(PSEC_EFF_WEG);
+	zod_psec_n_eff += (unsigned long)effect_list.size();
+
 	//process effects
 	for(vector<ZEffect*>::iterator i=effect_list.begin(); i!=effect_list.end();i++)
 	{
@@ -2257,6 +2562,8 @@ void ZPlayer::ProcessGame()
 		if((*i)->GetEFlags().unit_particles)
 			MissileObjectParticles((*i)->GetEFlags().x, (*i)->GetEFlags().y, (*i)->GetEFlags().unit_particles_radius, (*i)->GetEFlags().unit_particles_amount);
 	}
+
+	zod_psec_end(PSEC_EFF);
 
 	//the zeffects push new effects into this queue, so we need to move it to the real one
 	{
@@ -2271,9 +2578,13 @@ void ZPlayer::ProcessGame()
 		effect_list.push_back(*i);
 	new_effect_list.clear();
 
+	zod_psec_end(PSEC_EFF_NEU);
+
 	//animals
 	for(vector<ZObject*>::iterator i=bird_list.begin(); i!=bird_list.end();i++)
 		(*i)->Process();
+
+	zod_psec_end(PSEC_VOEGEL);
 
 	//gui
 	if(gui_window) 
@@ -2303,12 +2614,18 @@ void ZPlayer::ProcessGame()
 			(*i)->Process();
 	}
 
+	zod_psec_end(PSEC_GUI);
+
 	//placing a cannon?
 	SetPlaceCannonCords();
+
+	zod_psec_end(PSEC_KANONE);
 
 	//scroll
 	ProcessScroll();
 	ProcessFocusCamerato();
+
+	zod_psec_end(PSEC_SCROLL);
 }
 
 void ZPlayer::ProcessVerbalWarnings()
@@ -2514,6 +2831,10 @@ void ZPlayer::RenderScreen()
 		zod_rsec_end(RSEC_HUD_NEU);
 
 		zmap.DoRender(screen);
+
+		/* Warp F3: ab hier zaehlt jeder Blit als "ueber dem Hintergrund"
+		 * (Steinkoepfe, siehe zod_rockbake_modus). */
+		if(zod_rockbake_modus() > 0) zod_overdraw_begin();
 
 		zod_rsec_end(RSEC_KARTE);
 
@@ -3825,6 +4146,349 @@ void ZPlayer::RenderNews()
 	}
 }
 
+/* --- Messung: Zeichnen der Objekte je Objektart (Warp F3) ---------------
+ *
+ * `zeichnen.objekte` ist auf orig07 rund 10 ms. Hier wird je Objektart
+ * getrennt, und je Objekt danach, ob es etwas gezeichnet hat (Sichttest mit
+ * Treffer) oder nur geprueft und verworfen wurde. Nur jedes 16. Bild, damit
+ * die Uhrablesungen nichts verfaelschen. Index: map_object_type, 8 = Stein. */
+extern unsigned long zod_sicht_tests;     /* zsdl_opengl.cpp */
+extern unsigned long zod_sicht_treffer;
+
+#define ZOD_OD_ARTEN 9
+static unsigned long zod_od_bilder = 0, zod_od_zaehler = 0;
+static unsigned long zod_od_ticks[ZOD_OD_ARTEN][2];   /* [1] = sichtbar */
+static unsigned long zod_od_n[ZOD_OD_ARTEN][2];
+static unsigned long zod_od_tests[ZOD_OD_ARTEN];
+static unsigned long zod_od_schleife = 0;   /* ganze Schleife in Messbildern */
+
+extern "C" void zod_blit_microbench(void);   /* sdl_video.cpp */
+
+/* --- Steinkoepfe einbacken (Warp F3, Plan 6m) ----------------------------
+ *
+ * Ein sichtbarer Stein kostet rund 48 us -- drei 16x16-Kacheln, und jede
+ * Kachelzeile ist ein Fehlgriff in die Zeichenflaeche. Wie die Schatten
+ * (Cego) werden deshalb auch die Koepfe in die Kartenflaeche gestempelt;
+ * der Hintergrundblit bringt sie dann ohnehin mit.
+ *
+ * Gezeichnet wird ein Stein trotzdem, wenn in seinem Bereich in diesem Bild
+ * nach dem Hintergrund schon etwas gezeichnet wurde (Karteneffekte, Zonen,
+ * Vorzeichner, Wegpunkte, Objekte mit kleinerem Schluessel) -- dann muss er
+ * es zudecken wie bisher. Buch darueber fuehrt das Zellenraster in
+ * sdl_video.cpp (zod_overdraw_*).
+ *
+ * Jede spaetere Aenderung der Kartenflaeche (Krater, Zonenmarker,
+ * Gebaeudesockel, ChangeTile) meldet ZMap ueber den Stempelhaken; dort
+ * werden die Koepfe der betroffenen Steinspalten in Schluesselreihenfolge
+ * neu gestempelt. Aendert sich ein Stein selbst, laeuft ohnehin das volle
+ * Neueinbacken (RockGen, wie bei den Schatten).
+ *
+ * ZOD_ROCKBAKE 0 = aus (alter Weg), 1 = an (Vorgabe), 2 = an, aber jeden
+ * ausgelassenen Stein trotzdem zeichnen und pruefen, dass das Bild sich in
+ * seinem Bereich NICHT aendert. */
+extern "C" void zod_overdraw_begin(void);
+extern "C" void zod_overdraw_end(void);
+extern "C" int  zod_overdraw_test(int x, int y, int w, int h);
+
+static int zod_rb_modus = -1;
+static unsigned long zod_rb_gen = ~0UL;          /* RockGen beim letzten Einbacken */
+static bool zod_rb_im_backen = false;
+static vector<ZObject*> zod_rb_raster;            /* Stein je Kachel, Index ty*w+tx */
+static int zod_rb_w = 0, zod_rb_h = 0;
+static unsigned long zod_rb_gebacken = 0, zod_rb_haken = 0, zod_rb_neu = 0;
+static unsigned long zod_rb_weg = 0, zod_rb_gezeichnet = 0, zod_rb_bilder = 0;
+static unsigned long zod_rb_geprueft = 0, zod_rb_falsch = 0;
+static unsigned long zod_rb_lokal_n = 0, zod_rb_lokal_steine = 0, zod_rb_lokal_falsch = 0;
+static unsigned long zod_rb_lokal_ticks = 0, zod_rb_voll_ticks = 0;
+static unsigned long zod_rb_lokal_max = 0, zod_rb_lokal_bereiche = 0, zod_rb_zuviel = 0;
+#define ZOD_RB_MAX_BEREICHE 64   /* mehr Bereiche auf einmal: ganze Karte ist billiger */
+
+static int zod_rockbake_modus(void)
+{
+	if(zod_rb_modus < 0)
+	{
+		char buf[16];
+
+		zod_rb_modus = 1;
+		if(zod_env("ZOD_ROCKBAKE", buf, sizeof(buf)))
+			zod_rb_modus = (buf[0] == '0') ? 0 : (buf[0] == '2') ? 2 : (buf[0] == '3') ? 3 : 1;
+
+		ZLOG("Steinkoepfe: %s\n", zod_rb_modus == 0 ? "je Bild gezeichnet" :
+		     zod_rb_modus == 1 ? "eingebacken, oertlich nachgebacken" :
+		     zod_rb_modus == 2 ? "eingebacken, oertlich, mit Pruefung" :
+		     "eingebacken, immer ganze Karte nachgebacken");
+	}
+
+	return zod_rb_modus;
+}
+
+static bool zod_rb_stein(int tx, int ty);
+
+/* Im Rechteck cx0..cx1-1, cy0..cy1-1 (Kartenpunkte) alles neu stempeln, was
+ * die Steine dort hinterlassen: je Kachelspalte c erst die Schatten der
+ * Steine aus Spalte c-1, dann die Koepfe der Steine aus Spalte c, jeweils in
+ * aufsteigender Zeile -- dieselbe Folge wie beim Einbacken der ganzen Karte
+ * (erst alle Schatten, dann alle Koepfe; die Spalten beruehren einander
+ * nicht). Gestempelt wird NUR im Rechteck: ausserhalb bleibt die Flaeche,
+ * wie sie ist, und braucht deshalb keine Kette von Nachbarn. */
+static void zod_rb_nachstempeln(ZMap &zmap, int cx0, int cy0, int cx1, int cy1)
+{
+	if(cx1 <= cx0 || cy1 <= cy0) return;
+
+	const int tx0 = cx0 >> 4, tx1 = (cx1 - 1) >> 4;
+	const int ty0 = (cy0 >> 4) - 2, ty1 = (cy1 - 1) >> 4;
+
+	for(int c = tx0; c <= tx1; c++)
+	{
+		for(int r = ty0; r <= ty1; r++)
+			if(zod_rb_stein(c - 1, r))
+			{
+				zod_rb_raster[(size_t)r * zod_rb_w + (c - 1)]->BakeClip(zmap, 0, cx0, cy0, cx1, cy1);
+				zod_rb_neu++;
+			}
+
+		if(zod_rb_modus > 0)
+			for(int r = ty0; r <= ty1; r++)
+				if(zod_rb_stein(c, r))
+				{
+					zod_rb_raster[(size_t)r * zod_rb_w + c]->BakeClip(zmap, 1, cx0, cy0, cx1, cy1);
+					zod_rb_neu++;
+				}
+	}
+}
+
+static void zod_rb_haken_fn(void *ctx, int x, int y, int w, int h)
+{
+	ZMap &zmap = *(ZMap*)ctx;
+
+	if(zod_rb_im_backen || zod_rb_modus <= 0) return;
+	if(w <= 0 || h <= 0) return;
+	/* Raster nur gueltig, solange kein Stein sich geaendert hat -- sonst
+	 * koennte es auf geloeschte Steine zeigen. Dann den Bereich zum
+	 * anstehenden Nachbacken legen (sonst laege ein Krater, der in dieser
+	 * Luecke entsteht, ueber dem Schatten). Vor dem ersten Einbacken ist
+	 * nichts zu tun -- das ganze Einbacken kommt ohnehin. */
+	if(zod_rb_gen != zmap.RockGen() || zmap.RockBakedGen() != zmap.RockGen())
+	{
+		if(zod_rb_gen != ~0UL) zmap.RockRegionAdd(x, y, x + w - 1, y + h - 1);
+		return;
+	}
+
+	zod_rb_haken++;
+	zod_rb_im_backen = true;
+
+	/* Krater, Zonenmarker, Sockel liegen UNTER Schatten und Koepfen --
+	 * so wie es das Zeichnen je Bild zeigen wuerde. */
+	zod_rb_nachstempeln(zmap, x, y, x + w, y + h);
+
+	zod_rb_im_backen = false;
+}
+
+/* Alle Koepfe einbacken (nach den Schatten, in Schluesselreihenfolge) und das
+ * Raster neu aufbauen. */
+static void zod_rb_alle(ZMap &zmap, vector<ZObject*> &steine)
+{
+	const map_basics &mb = zmap.GetMapBasics();
+
+	zod_rb_w = mb.width;
+	zod_rb_h = mb.height;
+	zod_rb_raster.assign((size_t)zod_rb_w * zod_rb_h, (ZObject*)0);
+
+	zod_rb_im_backen = true;
+
+	for(size_t i = 0; i < steine.size(); i++)
+	{
+		int x, y;
+
+		steine[i]->GetCords(x, y);
+		steine[i]->BakeTop(zmap);
+
+		const int tx = x >> 4, ty = y >> 4;
+
+		if(tx >= 0 && ty >= 0 && tx < zod_rb_w && ty < zod_rb_h)
+			zod_rb_raster[(size_t)ty * zod_rb_w + tx] = steine[i];
+	}
+
+	zod_rb_im_backen = false;
+	zod_rb_gebacken++;
+
+	zmap.SetStampHook(zod_rb_haken_fn, &zmap);
+}
+
+/* Oertliches Nachbacken nach einer Steinaenderung (Warp F3, Plan 6o).
+ *
+ * Alles ist SPALTENWEISE: ein Stein in Kachelspalte c stempelt seinen Kopf
+ * in Spalte c (Zeilen r .. r+2) und seinen Schatten in Spalte c+1. In einer
+ * Spalte liegen also nur die Schatten der Steine aus c-1 und die Koepfe der
+ * Steine aus c, und sie ueberdecken einander nur innerhalb von zwei Zeilen.
+ *
+ * Fuer jede Spalte des frisch gezeichneten Bereichs wird das Zeilenintervall
+ * so weit ausgedehnt, dass kein Stein (aus c-1 oder c) es von aussen
+ * beruehrt; darin werden erst die Schatten, dann die Koepfe in aufsteigender
+ * Zeile neu gestempelt -- dieselbe Folge wie beim Einbacken der ganzen
+ * Karte. ZOD_ROCKBAKE 2 vergleicht das Ergebnis mit dem vollen Einbacken. */
+static bool zod_rb_stein(int tx, int ty)
+{
+	return tx >= 0 && ty >= 0 && tx < zod_rb_w && ty < zod_rb_h &&
+	       zod_rb_raster[(size_t)ty * zod_rb_w + tx] != 0;
+}
+
+static void zod_rb_lokal(ZMap &zmap, vector<ZObject*> &steine)
+{
+	/* Raster aus der aktuellen Liste -- geloeschte Steine sind dort schon raus */
+	zod_rb_raster.assign((size_t)zod_rb_w * zod_rb_h, (ZObject*)0);
+
+	for(size_t i = 0; i < steine.size(); i++)
+	{
+		int x, y;
+
+		steine[i]->GetCords(x, y);
+
+		const int tx = x >> 4, ty = y >> 4;
+
+		if(tx >= 0 && ty >= 0 && tx < zod_rb_w && ty < zod_rb_h)
+			zod_rb_raster[(size_t)ty * zod_rb_w + tx] = steine[i];
+	}
+
+	const vector<int> &rg = zmap.RockRegions();
+	const unsigned long vorher = zod_rb_neu;
+
+	zod_rb_im_backen = true;
+
+	/* RockShadowClear hat ganze Kacheln frisch gezeichnet: genau dieses
+	 * Kachelrechteck neu bestempeln (geklemmt wie dort). */
+	for(size_t k = 0; k + 3 < rg.size(); k += 4)
+	{
+		int tx0 = rg[k] >> 4, ty0 = rg[k + 1] >> 4;
+		int tx1 = rg[k + 2] >> 4, ty1 = rg[k + 3] >> 4;
+
+		if(tx0 < 0) tx0 = 0;
+		if(ty0 < 0) ty0 = 0;
+		if(tx1 >= zod_rb_w) tx1 = zod_rb_w - 1;
+		if(ty1 >= zod_rb_h) ty1 = zod_rb_h - 1;
+
+		zod_rb_nachstempeln(zmap, tx0 * 16, ty0 * 16, (tx1 + 1) * 16, (ty1 + 1) * 16);
+	}
+
+	zod_rb_im_backen = false;
+	zod_rb_lokal_steine += zod_rb_neu - vorher;
+	zod_rb_lokal_n++;
+}
+
+extern "C" void zod_rockbake_report(void)
+{
+	if(zod_rb_lokal_n)
+	{
+		const unsigned long f = zod_fineclock_freq();
+
+		ZLOG("Steine oertlich nachgebacken: %lu mal, %lu Bereiche, %lu Stempel, im Mittel %lu us, laengstes %lu us; "
+		     "%lu mal zu viele Bereiche (ganze Karte)",
+		     zod_rb_lokal_n, zod_rb_lokal_bereiche, zod_rb_lokal_steine,
+		     f ? (unsigned long)(((double)zod_rb_lokal_ticks * 1.0e6 / f) / zod_rb_lokal_n) : 0,
+		     f ? (unsigned long)((double)zod_rb_lokal_max * 1.0e6 / f) : 0, zod_rb_zuviel);
+		if(zod_rb_modus == 2)
+			ZLOG(" (volles Einbacken im Vergleich %lu us), %lu Abweichungen gegen das volle Einbacken (muss 0 sein)",
+			     f ? (unsigned long)(((double)zod_rb_voll_ticks * 1.0e6 / f) / zod_rb_lokal_n) : 0,
+			     zod_rb_lokal_falsch);
+		ZLOG("\n");
+	}
+
+	if(zod_rb_modus <= 0 || !zod_rb_bilder) return;
+
+	ZLOG("Steinkoepfe: %lu mal eingebacken, %lu Stempelmeldungen (%lu Koepfe neu), "
+	     "je Bild %lu ausgelassen, %lu gezeichnet\n",
+	     zod_rb_gebacken, zod_rb_haken, zod_rb_neu,
+	     zod_rb_weg / zod_rb_bilder, zod_rb_gezeichnet / zod_rb_bilder);
+
+	if(zod_rb_modus == 2)
+		ZLOG("Steinkoepfe Pruefung: %lu ausgelassene geprueft, %lu haetten das Bild geaendert (muss 0 sein)\n",
+		     zod_rb_geprueft, zod_rb_falsch);
+}
+static int zod_blitbench = -1;
+
+/* ZOD_BLITBENCH 1: einmal im 300. Spielbild die Blitwege messen und einen
+ * sichtbaren Stein N-mal zeichnen (ganzer Weg: GetBlitInfo, BlitSurface,
+ * UpperBlit, drei Kacheln). */
+void zod_rock_draw_bench(vector<ZObject*> &l, ZMap &zmap, SDL_Surface *screen)
+{
+	if(zod_blitbench < 0)
+	{
+		char buf[16];
+
+		zod_blitbench = (zod_env("ZOD_BLITBENCH", buf, sizeof(buf)) && buf[0] != '0') ? 1 : 0;
+	}
+
+	if(zod_blitbench != 1) return;
+
+	static unsigned long bild = 0;
+
+	if(++bild != 300) return;
+
+	zod_blitbench = 2;   /* nur einmal */
+
+	zod_blit_microbench();
+
+	int bx, by, bw, bh;
+
+	zmap.GetViewShiftFull(bx, by, bw, bh);
+
+	for(size_t i = 0; i < l.size(); i++)
+	{
+		unsigned char ot, oid;
+		int x, y;
+
+		l[i]->GetObjectID(ot, oid);
+		if(!(ot == MAP_ITEM_OBJECT && oid == ROCK_ITEM)) continue;
+
+		l[i]->GetCords(x, y);
+		if(x < bx || x + 16 > bx + bw || y < by || y + 48 > by + bh) continue;
+
+		const unsigned long N = 5000;
+		const unsigned long tr0 = zod_sicht_treffer;
+		const unsigned long t0 = zod_fineclock_ticks();
+
+		for(unsigned long k = 0; k < N; k++) l[i]->DoRender(zmap, screen);
+
+		const unsigned long t1 = zod_fineclock_ticks();
+		const unsigned long f = zod_fineclock_freq();
+
+		ZLOG("Blitmessung J ganzer Stein (DoRender, ref_id %d): %lu ns je Stein, %lu Kacheln je Stein\n",
+		     l[i]->GetRefID(), f ? (unsigned long)(((double)(t1 - t0) * 1.0e9 / f) / N) : 0,
+		     (zod_sicht_treffer - tr0) / N);
+		return;
+	}
+
+	ZLOG("Blitmessung J: kein ganz sichtbarer Stein gefunden\n");
+}
+
+extern "C" void zod_objdraw_report(void)
+{
+	const unsigned long f = zod_fineclock_freq();
+
+	if(!zod_od_bilder || f < 1000) return;
+
+	static const char *nm[ZOD_OD_ARTEN] =
+		{ "rock_object", "bruecke", "gebaeude", "kanone", "fahrzeug", "roboter", "tier",
+		  "kartenobjekt", "stein" };
+
+	ZLOG("Objekte zeichnen je Art (%ld Messbilder, Schleife %ld us je Bild):\n",
+	     (long)zod_od_bilder, (long)((zod_od_schleife / zod_od_bilder) * 1000UL / (f / 1000UL)));
+
+	for(int t = 0; t < ZOD_OD_ARTEN; t++)
+	{
+		if(!zod_od_n[t][0] && !zod_od_n[t][1]) continue;
+
+		ZLOG("  %s: %ld unsichtbar %ld us, %ld sichtbar %ld us (je Objekt %ld us), %ld Sichttests je Bild\n",
+		     nm[t],
+		     (long)(zod_od_n[t][0] / zod_od_bilder),
+		     (long)((zod_od_ticks[t][0] / zod_od_bilder) * 1000UL / (f / 1000UL)),
+		     (long)(zod_od_n[t][1] / zod_od_bilder),
+		     (long)((zod_od_ticks[t][1] / zod_od_bilder) * 1000UL / (f / 1000UL)),
+		     (long)(zod_od_n[t][1] ? (unsigned long)(((double)zod_od_ticks[t][1] / zod_od_n[t][1]) * 1000000.0 / f) : 0),
+		     (long)(zod_od_tests[t] / zod_od_bilder));
+	}
+}
+
 void ZPlayer::RenderObjects()
 {
 	//draw effects pre stuff
@@ -3865,11 +4529,102 @@ void ZPlayer::RenderObjects()
 	 *
 	 * `ZOD_STEINE aus` laesst die Schatten dynamisch -- der Rueckweg und das
 	 * Gegenstueck fuer den A/B-Vergleich im selben Binary. */
-	if(steine_backen_an() && zmap.RockBakedGen() != zmap.RockGen())
+	bool rb_frisch = false;
+
+	/* Warp F3: oertlich, wenn schon einmal ganz eingebacken wurde und nur
+	 * Steine sich geaendert haben (RockShadowClear hat die Bereiche gemeldet). */
+	bool rb_lokal = steine_backen_an() && zmap.RockBakedGen() != zmap.RockGen() &&
+	                zod_rockbake_modus() != 3 && zod_rb_gen != ~0UL &&
+	                zmap.RockBakedGen() != ~0UL && !zmap.RockRegions().empty() &&
+	                zod_rb_w == (int)zmap.GetMapBasics().width &&
+	                zod_rb_h == (int)zmap.GetMapBasics().height;
+
+	if(rb_lokal && zmap.RockRegions().size() / 4 > ZOD_RB_MAX_BEREICHE)
 	{
+		rb_lokal = false;   /* z. B. beim Spielbeginn, wenn die Steine nach und nach eintreffen */
+		zod_rb_zuviel++;
+	}
+
+	if(rb_lokal)
+	{
+		const unsigned long t0 = zod_fineclock_ticks();
+
+		zod_rb_lokal_bereiche += (unsigned long)(zmap.RockRegions().size() / 4);
+		zod_rb_lokal(zmap, ols.prerender_band_olist);
+
+		const unsigned long dt = zod_fineclock_ticks() - t0;
+
+		zod_rb_lokal_ticks += dt;
+		if(dt > zod_rb_lokal_max) zod_rb_lokal_max = dt;
+
+		if(zod_rb_modus == 2)
+		{
+			/* Gegenprobe: ganze Karte darueber einbacken, Unterschied zaehlen */
+			SDL_Surface *fr = zmap.GetRender().GetBaseSurface();
+
+			if(fr && fr->pixels)
+			{
+				const size_t n = (size_t)fr->pitch * fr->h;
+				unsigned char *kopie = (unsigned char*)malloc(n);
+
+				if(kopie)
+				{
+					memcpy(kopie, fr->pixels, n);
+
+					const unsigned long t1 = zod_fineclock_ticks();
+
+					for(vector<ZObject*>::iterator i=ols.prerender_band_olist.begin();
+					    i!=ols.prerender_band_olist.end(); i++)
+						(*i)->BakePreRender(zmap);
+					zod_rb_alle(zmap, ols.prerender_band_olist);
+					zod_rb_gebacken--;   /* das war nur die Gegenprobe */
+					zod_rb_voll_ticks += zod_fineclock_ticks() - t1;
+
+					const unsigned char *p = (const unsigned char*)fr->pixels;
+					unsigned long anders = 0;
+
+					for(size_t i = 0; i < n; i++)
+						if(p[i] != kopie[i]) anders++;
+
+					if(anders)
+					{
+						if(zod_rb_lokal_falsch < 8)
+							ZLOG("Steine oertlich: %lu Punkte anders als beim vollen Einbacken\n", anders);
+						zod_rb_lokal_falsch++;
+					}
+
+					free(kopie);
+				}
+			}
+		}
+
+		zmap.RockBakedSet(zmap.RockGen());
+		zmap.RockRegionsClear();
+		zod_rb_gen = zmap.RockGen();
+		zod_steine_gebacken++;
+		rb_frisch = true;
+		zod_dirty_force_full();
+	}
+	else if(steine_backen_an() && zmap.RockBakedGen() != zmap.RockGen())
+	{
+		const unsigned long tv = zod_fineclock_ticks();
+
 		for(vector<ZObject*>::iterator i=ols.prerender_band_olist.begin();
 		    i!=ols.prerender_band_olist.end(); i++)
 			(*i)->BakePreRender(zmap);
+
+		zmap.RockRegionsClear();
+		(void)tv;
+
+		/* Warp F3: danach die Koepfe -- ueber allen Schatten, wie beim
+		 * Zeichnen (Vorzeichnen kommt vor den Objekten). Die Bandliste ist
+		 * sortiert, also auch die Koepfe in Zeichenreihenfolge. */
+		if(zod_rockbake_modus() > 0)
+		{
+			zod_rb_alle(zmap, ols.prerender_band_olist);
+			zod_rb_gen = zmap.RockGen();
+			rb_frisch = true;   /* der Hintergrund DIESES Bildes hat sie noch nicht */
+		}
 
 		zmap.RockBakedSet(zmap.RockGen());
 		zod_steine_gebacken++;
@@ -3951,8 +4706,136 @@ void ZPlayer::RenderObjects()
 	zod_rsec_end(RSEC_WEGPUNKTE);
 
 	//draw objects
+	zod_rock_draw_bench(ols.prender_olist, zmap, screen);
+
+	if(zod_time_measure && ((zod_od_zaehler++ & 15) == 0))
+	{
+		const unsigned long s0 = zod_fineclock_ticks();
+
+		zod_od_bilder++;
+
+		for(vector<ZObject*>::iterator i=ols.prender_olist.begin(); i!=ols.prender_olist.end(); i++)
+		{
+			unsigned char ot, oid;
+			const unsigned long tr0 = zod_sicht_treffer, te0 = zod_sicht_tests;
+
+			(*i)->GetObjectID(ot, oid);
+
+			const unsigned long t0 = zod_fineclock_ticks();
+
+			(*i)->DoRender(zmap, screen);
+
+			const unsigned long t1 = zod_fineclock_ticks();
+			int a = (ot == MAP_ITEM_OBJECT && oid == ROCK_ITEM) ? 8 : (ot < 8 ? ot : 7);
+			const int sichtbar = (zod_sicht_treffer != tr0) ? 1 : 0;
+
+			zod_od_ticks[a][sichtbar] += t1 - t0;
+			zod_od_n[a][sichtbar]++;
+			zod_od_tests[a] += zod_sicht_tests - te0;
+		}
+
+		zod_od_schleife += zod_fineclock_ticks() - s0;
+	}
+	else if(zod_sort_modus > 0 && zod_sortcache_gueltig(zod_sc[0], ols.prender_olist, &ols, ols.version))
+	{
+		/* Warp F3: Steine ausserhalb des sichtbaren Streifens gar nicht erst
+		 * lesen. Ihr Schluessel steht im Sortierspeicher, gezeichnet wird nur
+		 * in key-48 .. key. Verworfen haette sie GetBlitInfo ohnehin; 16
+		 * Punkte Rand oben und unten zur Sicherheit. Reihenfolge der uebrigen
+		 * bleibt die der Liste. ZOD_SORTCACHE 2: trotzdem zeichnen und
+		 * pruefen, dass kein Sichttest trifft. */
+		const zod_sortcache &c = zod_sc[0];
+		int bx, by, bw, bh;
+
+		zmap.GetViewShiftFull(bx, by, bw, bh);
+
+		const int oben = by - 16;
+		const int unten = by + bh + 16;
+		/* Koepfe auslassen nur, wenn sie im Hintergrund dieses Bildes stehen */
+		const bool koepfe = zod_rb_modus > 0 && !rb_frisch && steine_backen_an() &&
+		                    zod_rb_gen == zmap.RockGen() && zmap.RockBakedGen() == zmap.RockGen();
+
+		zod_cull_bilder++;
+		if(koepfe) zod_rb_bilder++;
+
+		for(size_t i = 0; i < c.ptr.size(); i++)
+		{
+			if(koepfe && (c.art[i] & 4) && !(c.key[i] < oben || c.key[i] - 48 > unten))
+			{
+				/* sichtbarer Stein: Bereich x .. x+16, key-48 .. key */
+				const int sx = c.xs[i] - bx, sy = c.key[i] - 48 - by;
+
+				if(!zod_overdraw_test(sx, sy, 16, 48))
+				{
+					zod_rb_weg++;
+
+					if(zod_rb_modus == 2 && screen && screen->format->BytesPerPixel == 1)
+					{
+						/* Bereich sichern, Stein zeichnen, vergleichen */
+						int x0 = sx - 16, y0 = sy - 16, x1 = sx + 32, y1 = sy + 64;
+
+						if(x0 < 0) x0 = 0;
+						if(y0 < 0) y0 = 0;
+						if(x1 > screen->w) x1 = screen->w;
+						if(y1 > screen->h) y1 = screen->h;
+
+						if(x1 > x0 && y1 > y0)
+						{
+							static unsigned char sich[96 * 96];
+							const int ww = x1 - x0;
+							unsigned char *px = (unsigned char*)screen->pixels;
+
+							for(int yy = y0; yy < y1; yy++)
+								memcpy(sich + (yy - y0) * ww, px + yy * screen->pitch + x0, (size_t)ww);
+
+							c.ptr[i]->DoRender(zmap, screen);
+							zod_rb_geprueft++;
+
+							for(int yy = y0; yy < y1; yy++)
+								if(memcmp(sich + (yy - y0) * ww, px + yy * screen->pitch + x0, (size_t)ww))
+								{
+									if(zod_rb_falsch < 8)
+										ZLOG("Steinkoepfe: ref_id %d aendert das Bild (Zeile %d, Schirm %d,%d)\n",
+										     c.ptr[i]->GetRefID(), yy, sx, sy);
+									zod_rb_falsch++;
+									break;
+								}
+						}
+					}
+					continue;
+				}
+
+				zod_rb_gezeichnet++;
+			}
+
+			if((c.art[i] & 4) && (c.key[i] < oben || c.key[i] - 48 > unten))
+			{
+				zod_cull_weg++;
+
+				if(zod_sort_modus == 2)
+				{
+					const unsigned long tr0 = zod_sicht_treffer;
+
+					c.ptr[i]->DoRender(zmap, screen);
+					if(zod_sicht_treffer != tr0)
+					{
+						if(zod_cull_falsch < 8)
+							ZLOG("Steinstreifen: ref_id %d haette gezeichnet (key %d, Ausschnitt %d..%d)\n",
+							     c.ptr[i]->GetRefID(), c.key[i], by, by + bh);
+						zod_cull_falsch++;
+					}
+				}
+				continue;
+			}
+
+			c.ptr[i]->DoRender(zmap, screen);
+		}
+	}
+	else
 	for(vector<ZObject*>::iterator i=ols.prender_olist.begin(); i!=ols.prender_olist.end(); i++)
 		(*i)->DoRender(zmap, screen);
+
+	zod_overdraw_end();
 
 	zod_rsec_end(RSEC_OBJEKTE);
 

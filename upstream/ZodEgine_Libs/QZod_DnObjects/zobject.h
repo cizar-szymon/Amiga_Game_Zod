@@ -49,6 +49,18 @@ class QZOD_DNOBJECTSSHARED_EXPORT ZObject
 		inline team_type GetOwner() { return owner; }
 		inline void GetDimensions(int &w, int &h) { w = width; h = height; }
 		inline void GetDimensionsPixel(int &w_pix, int &h_pix) { w_pix = width_pix; h_pix = height_pix; }
+		/* Schluessel der Zeichenreihenfolge, wie sort_objects_func (Warp F3). */
+		inline int SortKey() const { return loc.y + height_pix; }
+		/* true: Process() tut nichts (ORock, OMapObject) -- ZPlayer::ProcessGame
+		 * darf den Aufruf auslassen (Warp F3). */
+		virtual bool ProcessNoop() const { return false; }
+		/* Warp F3: das, was DoRender zeichnet, in die Kartenflaeche stempeln
+		 * (nur ORock). */
+		virtual void BakeTop(ZMap &the_map) { (void)the_map; }
+		/* Warp F3: Schatten (welche 0) bzw. Kopf (1) nur im Rechteck
+		 * cx0..cx1-1, cy0..cy1-1 stempeln (nur ORock). */
+		virtual void BakeClip(ZMap &the_map, int welche, int cx0, int cy0, int cx1, int cy1)
+		{ (void)the_map; (void)welche; (void)cx0; (void)cy0; (void)cx1; (void)cy1; }
 		virtual int Process();
 		int ProcessObject();
 // 		virtual SDL_Surface *GetRender();
@@ -394,6 +406,27 @@ class QZOD_DNOBJECTSSHARED_EXPORT ZObject
 		virtual void ProcessServerLid();
 		virtual void ProcessAttackDamage(ZMap &tmap, bool attack_player_given);
 		virtual void ProcessRunStamina(double time_dif);
+
+		/* Kartenobjekt, fuer das ProcessServer nichts tut (Warp F3).
+		 *
+		 * Steine, Baeume, Huetten, Fahnen sind MAP_ITEM_OBJECT und
+		 * ueberschreiben keine der Server-Funktionen. Fuer sie bleibt von
+		 * ProcessServer nur: Zeitstempel fortschreiben, sflags loeschen,
+		 * Ausdauer gegen die Obergrenze klemmen. Das ist genau dann ein
+		 * Leerlauf, wenn alle Bedingungen unten gelten -- dann bleiben auch
+		 * die sflags leer (nur eigene Methoden setzen sie, keine fremde
+		 * Stelle), und die Auswerteschleife im Server haette nichts zu tun.
+		 * `ZOD_INERTCHECK 1` rechnet trotzdem voll und zaehlt Abweichungen. */
+		bool ServerInert() const
+		{
+			return object_type == MAP_ITEM_OBJECT && !do_auto_repair &&
+			       !attack_object && !is_running && stamina >= max_stamina &&
+			       waypoint_list.empty();
+		}
+		void ServerInertTick(double the_time) { last_process_server_time = the_time; server_skipped = true; }
+		/* in diesem Takt uebersprungen: die sflags-Auswertung auch auslassen */
+		bool server_skipped = false;
+		double GetStamina() const { return stamina; }
 		server_flag &GetSFlags()
 		{
 			return sflags;
@@ -645,6 +678,10 @@ public:
     ZOLists();
 
     void Init(vector<ZObject*> *object_list_) { object_list = object_list_; }
+
+    /* Zaehlt jede Aenderung der Listen hoch (Warp F3). Der Sortierspeicher in
+     * ZPlayer::ProcessGame verwirft seine Schluessel, sobald sie sich aendert. */
+    unsigned long version = 0;
 
     void AddObject(ZObject *obj);
     void DeleteObject(ZObject *obj);

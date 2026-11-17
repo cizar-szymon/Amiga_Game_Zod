@@ -54,6 +54,11 @@ void zod_time_measure_enable();
 void zod_time_report(double &render, double &flip, double &process, double &socket, long &frames);
 /* zplayer.cpp -- Aufteilung von `zeichnen` auf 14 Abschnitte */
 extern "C" void zod_render_sections_report(long frames);
+extern "C" void zod_game_sections_report(long frames);
+extern "C" void zod_sortcache_report(void);
+extern "C" void zod_objdraw_report(void);
+extern "C" void zod_blitkey_report(void);
+extern "C" void zod_rockbake_report(void);
 /* zsdl_opengl.cpp -- Spitzenwerte des Skalierers und Groessenhistogramm */
 extern "C" void zod_roto_peak_report(unsigned long *calls, unsigned long *made,
                                      unsigned long *bytes, unsigned long *eject,
@@ -689,6 +694,11 @@ void run_single_player()
                     //Zeilen muss `zeichnen` ergeben -- fehlt etwas, ist es
                     //nicht eingeklammert und die Suche geht dort weiter.
                     zod_render_sections_report(tframes);
+                    zod_game_sections_report(tframes);
+                    zod_sortcache_report();
+                    zod_objdraw_report();
+                    zod_blitkey_report();
+                    zod_rockbake_report();
 
                     /* Der Mittelwert kann einen Einbruch nicht zeigen. */
                     zod_worst_report();

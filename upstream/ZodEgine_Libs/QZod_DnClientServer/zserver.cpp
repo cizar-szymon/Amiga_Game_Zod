@@ -1,5 +1,7 @@
 #include "zserver.h"
 #include "fineclock.h"   /* feine Uhr -- current_time() loest hier 20 ms auf */
+#include "amiga_startup.h"   /* zod_env */
+#include <string.h>   /* memcmp: Merkfeld */
 
 /* --- Aufteilung des Postens `server` -------------------------------------
  *
@@ -84,8 +86,148 @@ static inline void zod_ssec_end(int slot)
 	zod_ssec_mark = jetzt;
 }
 
+/* Warp F3, Messung: ProcessServer je Objektart, nur in jedem 16. Bild
+ * (ReadEClock kostet selbst rund 13 us; je Objekt in jedem Bild waere das
+ * auf p08m01 mehrere ms). Abgezogen wird der gemessene Preis einer
+ * Uhrablesung. Index: map_object_type, [1] = zerstoert. */
+extern "C" {
+extern int           zod_prof_frame;
+extern unsigned long zod_pe_aufrufe, zod_pe_suchen, zod_pe_paare, zod_pe_ticks, zod_pe_gemessen;
+}
+static unsigned long zod_ot_ticks[MAX_MAP_OBJECT_TYPES][2];
+static unsigned long zod_ot_n[MAX_MAP_OBJECT_TYPES][2];
+static unsigned long zod_ot_abl[MAX_MAP_OBJECT_TYPES][2];   /* abzuziehende Uhrablesungen */
+static unsigned long zod_ot_bilder = 0, zod_ot_uhr = 0, zod_ot_uhr_n = 0;
+static unsigned long zod_ot_leer = 0;   /* uebersprungene Kartenobjekte, alle Bilder */
+
+/* Warp F3: Kartenobjekte im Leerlauf (siehe ProcessObjects).
+ * 0 = aus, 1 = je Bild ServerInert() fragen, 3 = Merkfeld (Vorgabe),
+ * 2 = Merkfeld, aber trotzdem voll rechnen und pruefen. */
+static int           zod_inert_mode = -1;
+static unsigned long zod_inert_geprueft = 0, zod_inert_falsch = 0;
+
+static void zod_inert_init(void)
+{
+	char buf[16];
+
+	zod_inert_mode = 3;
+	if(zod_env("ZOD_INERTSKIP", buf, sizeof(buf)))
+	{
+		if(buf[0] == '0') zod_inert_mode = 0;
+		else if(buf[0] == '1') zod_inert_mode = 1;
+	}
+	if(zod_env("ZOD_INERTCHECK", buf, sizeof(buf)) && buf[0] != '0') zod_inert_mode = 2;
+	ZLOG("Kartenobjekte im Leerlauf: %s\n",
+	     zod_inert_mode == 0 ? "voll gerechnet" :
+	     zod_inert_mode == 1 ? "je Bild geprueft und uebersprungen" :
+	     zod_inert_mode == 3 ? "per Merkfeld uebersprungen" : "per Merkfeld, voll nachgerechnet");
+}
+
+/* Merkfeld: je Eintrag von object_list ein Byte "Kartenobjekt im Leerlauf".
+ *
+ * Gemessen (Plan 6h): Auch das blosse Fragen ServerInert() kostet je
+ * Kartenobjekt rund 4 us -- die Objekte liegen verstreut auf der Halde, und
+ * Abfrage, Zeitstempel und der Merker fuer die zweite Schleife beruehren
+ * mehrere Cache-Zeilen. Auf orig07 3,5 ms, auf p08m01 12 ms je Bild.
+ *
+ * Das Merkfeld wird nur neu aufgebaut, wenn sich die Liste geaendert hat
+ * (ZOLists::version, dazu Zeigervergleich). Dazwischen werden die Objekte
+ * nicht gelesen. Annahme dabei: Ein Kartenobjekt verlaesst den Leerlauf nie
+ * (kein Angriffsziel, keine Wegpunkte, keine Selbstreparatur -- die gibt es
+ * nur fuer Gebaeude). ZOD_INERTCHECK 1 prueft genau das je Bild.
+ *
+ * Der Zeitstempel last_process_server_time bleibt dabei stehen. Er dient nur
+ * dem time_dif der eigenen ProcessServer, und darin nur der Ausdauer, die
+ * fuer Kartenobjekte schon an der Obergrenze steht. */
+static vector<ZObject*>      zod_sk_ptr;
+static vector<unsigned char> zod_sk_flag;
+static unsigned long         zod_sk_version = 0;
+static const void           *zod_sk_owner = 0;
+static unsigned long         zod_sk_neu = 0;
+
+static bool zod_skip_gueltig(const vector<ZObject*> &l, const ZOLists &ols)
+{
+	return zod_sk_owner == &ols && zod_sk_version == ols.version && zod_sk_ptr.size() == l.size();
+}
+
+static void zod_skip_auffrischen(vector<ZObject*> &l, ZOLists &ols)
+{
+	const size_t n = l.size();
+
+	if(zod_skip_gueltig(l, ols) &&
+	   (n == 0 || memcmp(&zod_sk_ptr[0], &l[0], n * sizeof(ZObject*)) == 0))
+		return;
+
+	zod_sk_ptr = l;
+	zod_sk_flag.resize(n);
+
+	for(size_t i = 0; i < n; i++)
+	{
+		ZObject *o = l[i];
+		const bool leer = o->ServerInert();
+
+		zod_sk_flag[i] = leer ? 1 : 0;
+		if(leer) o->server_skipped = true;   /* fuer die zweite Schleife */
+	}
+
+	zod_sk_owner = &ols;
+	zod_sk_version = ols.version;
+	zod_sk_neu++;
+}
+
 extern "C" void zod_server_sections_report(long frames)
 {
+	if(zod_inert_mode == 2)
+		ZLOG("INERTCHECK: %ld geprueft, %ld Abweichungen\n",
+		     (long)zod_inert_geprueft, (long)zod_inert_falsch);
+
+	if(zod_ot_bilder && zod_ot_uhr_n && zod_fineclock_freq() >= 1000)
+	{
+		static const char *nm[MAX_MAP_OBJECT_TYPES] =
+			{ "stein", "bruecke", "gebaeude", "kanone", "fahrzeug", "roboter", "tier", "kartenobjekt" };
+		const unsigned long f = zod_fineclock_freq();
+		/* Preis einer Uhrablesung in Ticks, x1000 fuer Nachkommastellen */
+		const unsigned long uhr1000 = (zod_ot_uhr * 1000UL) / zod_ot_uhr_n;
+		unsigned long pe_uhr = 0;
+
+		ZLOG("ProcessServer je Objektart (%ld Messbilder, Uhrablesung %ld ns):\n",
+		     (long)zod_ot_bilder, (long)((uhr1000 / 1000UL) * 1000000UL / (f / 1000UL) / 1000UL));
+
+		for(int t = 0; t < MAX_MAP_OBJECT_TYPES; t++)
+			for(int d = 0; d < 2; d++)
+			{
+				if(!zod_ot_n[t][d]) continue;
+
+				const unsigned long abzug = (zod_ot_abl[t][d] * uhr1000) / 1000UL;
+				const unsigned long netto = zod_ot_ticks[t][d] > abzug ? zod_ot_ticks[t][d] - abzug : 0;
+				/* us je Bild und je Objekt */
+				const unsigned long je_bild = (netto / zod_ot_bilder) * 1000UL / (f / 1000UL);
+				const unsigned long je_obj = (unsigned long)(((double)netto / zod_ot_n[t][d]) * 1000000.0 / f);
+
+				ZLOG("  %s%s: %ld je Bild, %ld us je Bild, %ld us je Objekt\n",
+				     nm[t], d ? " (zerstoert)" : "", (long)(zod_ot_n[t][d] / zod_ot_bilder),
+				     (long)je_bild, (long)je_obj);
+			}
+
+		if(zod_pe_gemessen)
+		{
+			const unsigned long abzug = (zod_pe_gemessen * uhr1000) / 1000UL;
+			const unsigned long netto = zod_pe_ticks > abzug ? zod_pe_ticks - abzug : 0;
+
+			pe_uhr = abzug;
+			ZLOG("  davon CheckPassiveEngage: %ld us je Bild (%ld Aufrufe je Bild)\n",
+			     (long)((netto / zod_ot_bilder) * 1000UL / (f / 1000UL)),
+			     (long)(zod_pe_gemessen / zod_ot_bilder));
+		}
+		(void)pe_uhr;
+
+		ZLOG("  Kartenobjekte uebersprungen: %ld je Bild, Merkfeld %ld mal neu aufgebaut\n",
+		     (long)(zod_ot_leer / (zod_ssec_takte ? zod_ssec_takte : 1)), (long)zod_sk_neu);
+		ZLOG("CheckPassiveEngage alle Bilder: %ld Aufrufe, %ld Suchen, %ld Paare je Bild\n",
+		     (long)(zod_pe_aufrufe / zod_ssec_takte), (long)(zod_pe_suchen / zod_ssec_takte),
+		     (long)(zod_pe_paare / zod_ssec_takte));
+	}
+
 	const unsigned long freq = zod_fineclock_freq();
 
 	/* `freq / 1000` ist unten der Teiler -- unter 1000 waere er 0 und der
@@ -1324,8 +1466,100 @@ void ZServer::ProcessObjects()
 	zod_ssec_end(SSEC_LOESCHEN);
 
 	//process all the objects
-	for(obj=object_list.begin(); obj!=object_list.end();obj++) 
-		(*obj)->ProcessServer(zmap, ols);
+	//
+	//Warp F3: Kartenobjekte im Leerlauf (ZObject::ServerInert) nur mit
+	//Zeitstempel, ohne ProcessServer. Auf orig07 sind das 3752 von rund
+	//4000 Objekten; `process` kostete dort 9,6 ms je Bild. Reihenfolge der
+	//uebrigen bleibt dieselbe, also auch die der rand()-Aufrufe.
+	//ZOD_INERTCHECK 1: trotzdem voll rechnen und pruefen, dass es ein
+	//Leerlauf war. ZOD_INERTSKIP 0: Abkuerzung aus (A/B-Messung).
+	if(zod_inert_mode < 0) zod_inert_init();
+
+	const bool prof = (zod_ssec_an > 0) && ((zod_ssec_takte & 15) == 0);
+
+	if(prof)
+	{
+		/* Preis einer Uhrablesung: zwei direkt hintereinander */
+		const unsigned long a = zod_fineclock_ticks();
+		const unsigned long b = zod_fineclock_ticks();
+
+		zod_ot_uhr += b - a;
+		zod_ot_uhr_n++;
+		zod_ot_bilder++;
+	}
+
+	const bool sk_cache = (zod_inert_mode >= 2);
+
+	if(sk_cache) zod_skip_auffrischen(object_list, ols);
+
+	const unsigned long sk_v0 = ols.version;
+
+	for(size_t i = 0; i < object_list.size(); i++)
+	{
+		ZObject *o = object_list[i];
+		/* ProcessServer aendert object_list nicht (Neues geht ueber
+		 * new_object_list) -- geprueft wird es trotzdem: stimmt die Version
+		 * nicht mehr, wird wieder je Objekt gefragt. */
+		const bool aus_feld = sk_cache && ols.version == sk_v0 && i < zod_sk_flag.size();
+		const bool leer = aus_feld ? (zod_sk_flag[i] != 0)
+		                           : (zod_inert_mode != 0 && o->ServerInert());
+
+		if(leer)
+		{
+			zod_ot_leer++;
+
+			if(zod_inert_mode == 2)
+			{
+				const double st = o->GetStamina();
+				const bool noch_leer = o->ServerInert();
+
+				o->ProcessServer(zmap, ols);
+				zod_inert_geprueft++;
+				if(!noch_leer || !o->GetSFlags().quiet() || o->GetStamina() != st || !o->ServerInert())
+				{
+					if(zod_inert_falsch < 10)
+						ZLOG("INERTCHECK: Abweichung ref_id=%d leer=%d flags=%d ausdauer=%d\n", o->GetRefID(), (int)noch_leer, (int)o->GetSFlags().quiet(), (int)(o->GetStamina() != st));
+					zod_inert_falsch++;
+				}
+			}
+			else if(!aus_feld)
+				o->ServerInertTick(the_time);
+			/* aus dem Merkfeld: das Objekt wird gar nicht gelesen */
+
+			continue;
+		}
+
+		if(prof)
+		{
+			unsigned char ot, oid;
+			const int d = o->IsDestroyed() ? 1 : 0;
+			const unsigned long pe0 = zod_pe_gemessen;
+
+			o->GetObjectID(ot, oid);
+			zod_prof_frame = 1;
+
+			const unsigned long t0 = zod_fineclock_ticks();
+
+			o->ProcessServer(zmap, ols);
+
+			const unsigned long t1 = zod_fineclock_ticks();
+
+			zod_prof_frame = 0;
+
+			if(ot < MAX_MAP_OBJECT_TYPES)
+			{
+				/* die zwei Ablesungen in CheckPassiveEngage stecken mit drin:
+				 * je gemessenem Aufruf eine Ablesung mehr abziehen -- geschieht
+				 * im Bericht ueber zod_ot_n, hier als zusaetzliche Zaehlung */
+				zod_ot_ticks[ot][d] += t1 - t0;
+				zod_ot_n[ot][d]++;
+				zod_ot_abl[ot][d] += 1 + (zod_pe_gemessen - pe0);
+			}
+			continue;
+		}
+
+		o->ProcessServer(zmap, ols);
+	}
 
 	zod_ssec_end(SSEC_PROCESS);
 
@@ -1364,9 +1598,21 @@ void ZServer::ProcessObjects()
 	zod_ssec_end(SSEC_WEGERGEBNIS);
 
 	//check to see what updated and needs to be sent to the clients
+	const bool sk_feld2 = (zod_inert_mode == 3) && zod_skip_gueltig(object_list, ols);
+	const unsigned long sk_v2 = ols.version;
+	size_t sk_i = 0;
+
 	for(obj=object_list.begin(); obj!=object_list.end(); )
 	{
 		ZObject *tobj;
+
+		//Warp F3: im Leerlauf uebersprungen -- ProcessServer haette die
+		//sflags geloescht, hier waere nichts zu tun gewesen. Aus dem
+		//Merkfeld, solange die Liste unveraendert ist; sonst der Merker im
+		//Objekt (beim Aufbau des Merkfelds gesetzt, von ProcessServer
+		//geloescht).
+		if((sk_feld2 && ols.version == sk_v2) ? (zod_sk_flag[sk_i] != 0) : (*obj)->server_skipped)
+		{ obj++; sk_i++; continue; }
 
 		//this case can cut us early
 		//because it will delete this object entirely
@@ -1524,6 +1770,7 @@ void ZServer::ProcessObjects()
 		//there is more then one way this can increment
 		//so we need it here and not in the for
 		obj++;
+		sk_i++;
 	}
 
 	zod_ssec_end(SSEC_UPDATE);

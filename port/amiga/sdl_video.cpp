@@ -25,6 +25,7 @@
 #include "amiga_startup.h"
 #include "ammx.h"
 #include "fastcopy.h"
+#include "blitkey.h"   /* Schluesselblit je Langwort (Warp F3) */
 /* ACHTUNG: HIER STAND `#include <proto/dos.h>`, und zwar UNBEDINGT.
  * Auf dem Host gibt es den Header nicht -- damit liess sich `make shimtest`
  * seit dem 19.09. nicht mehr uebersetzen, ohne dass es jemandem auffiel.
@@ -574,11 +575,81 @@ extern "C" void zod_dirty_out_mark(int x, int y, int w, int h)
 extern "C" void zod_dirty_scrollblit_begin(void) { im_scrollblit = 1; }
 extern "C" void zod_dirty_scrollblit_end(void)   { im_scrollblit = 0; }
 
+/* Warp F3: "seit dem Hintergrund beschrieben" in 8x8-Zellen.
+ *
+ * ZPlayer schaltet das nach zmap.DoRender ein (zod_overdraw_begin) und nach
+ * dem Objektdurchlauf aus. Ein eingebackener Steinkopf darf nur dann
+ * ausgelassen werden, wenn in seinem Bereich bis zu seiner Stelle in der
+ * Zeichenreihenfolge nichts gezeichnet wurde. Gefuellt wird hier in
+ * dirty_mark -- durch die laeuft jeder Blit und jedes FillRect auf die
+ * Zeichenflaeche. Der Wiederherstellungsblit zaehlt nicht (er IST der
+ * Hintergrund). */
+#define OD_MAX_W (2048 / 8)
+#define OD_MAX_H (2048 / 8)
+static unsigned char od_grid[OD_MAX_H][OD_MAX_W];
+static int od_an = 0, od_w = 0, od_h = 0;
+
+extern "C" void zod_overdraw_begin(void)
+{
+	if(!dirty_target) { od_an = 0; return; }
+
+	od_w = (dirty_target->w + 7) >> 3;
+	od_h = (dirty_target->h + 7) >> 3;
+	if(od_w > OD_MAX_W) od_w = OD_MAX_W;
+	if(od_h > OD_MAX_H) od_h = OD_MAX_H;
+
+	for(int y = 0; y < od_h; y++) memset(od_grid[y], 0, (size_t)od_w);
+
+	od_an = 1;
+}
+
+extern "C" void zod_overdraw_end(void) { od_an = 0; }
+
+/* 1, wenn in x..x+w, y..y+h (Schirmpunkte) seit begin etwas gezeichnet wurde.
+ * Ausserhalb des Schirms gilt als "nichts". */
+extern "C" int zod_overdraw_test(int x, int y, int w, int h)
+{
+	if(!od_an) return 1;
+
+	int x0 = x < 0 ? 0 : x >> 3;
+	int y0 = y < 0 ? 0 : y >> 3;
+	int x1 = (x + w - 1) >> 3;
+	int y1 = (y + h - 1) >> 3;
+
+	if(x1 >= od_w) x1 = od_w - 1;
+	if(y1 >= od_h) y1 = od_h - 1;
+
+	for(int cy = y0; cy <= y1; cy++)
+		for(int cx = x0; cx <= x1; cx++)
+			if(od_grid[cy][cx]) return 1;
+
+	return 0;
+}
+
+static inline void od_mark(int x, int y, int w, int h)
+{
+	int x0 = x < 0 ? 0 : x >> 3;
+	int y0 = y < 0 ? 0 : y >> 3;
+	int x1 = (x + w - 1) >> 3;
+	int y1 = (y + h - 1) >> 3;
+
+	if(x1 >= od_w) x1 = od_w - 1;
+	if(y1 >= od_h) y1 = od_h - 1;
+
+	for(int cy = y0; cy <= y1; cy++)
+		for(int cx = x0; cx <= x1; cx++)
+			od_grid[cy][cx] = 1;
+}
+
 /* Einen beschriebenen Bereich vermerken. Nur fuer die Zeichenflaeche --
  * Blits in Karten- oder Zwischenflaechen gehen den Schirm nichts an. */
 static inline void dirty_mark(SDL_Surface *dst, int x, int y, int w, int h)
 {
-	if(dst != dirty_target || w <= 0 || h <= 0 || !grid_w) return;
+	if(dst != dirty_target || w <= 0 || h <= 0) return;
+
+	if(od_an && !im_restore) od_mark(x, y, w, h);
+
+	if(!grid_w) return;
 
 	/* voller Hintergrundblit eines Scrollbildes: der Blitter hat das schon */
 	if(im_scrollblit) return;
@@ -866,6 +937,37 @@ extern "C" void zod_dirty_report(unsigned long long *bytes, unsigned long *frame
 }
 
 extern "C" unsigned long zod_dirty_calls_get(void) { return zod_dirty_calls; }
+
+/* Warp F3: Schluesselblit je Langwort. ZOD_BLITKEY 0 = alte Byteschleife,
+ * ZOD_BLITCHECK 1 = beide rechnen und vergleichen (Zaehler im Bericht). */
+static int zod_blitkey_modus = -1;
+unsigned long zod_blitkey_lang = 0, zod_blitkey_geprueft = 0, zod_blitkey_falsch = 0;
+
+static int zod_blitkey_an(void)
+{
+	if(zod_blitkey_modus < 0)
+	{
+		char wahl[16];
+
+		zod_blitkey_modus = 1;
+		if(zod_env("ZOD_BLITKEY", wahl, sizeof(wahl)) && wahl[0] == '0') zod_blitkey_modus = 0;
+		if(zod_env("ZOD_BLITCHECK", wahl, sizeof(wahl)) && wahl[0] != '0') zod_blitkey_modus = 2;
+		ZLOG("Schluesselblit: %s\n", zod_blitkey_modus == 0 ? "Byteschleife" :
+		     zod_blitkey_modus == 1 ? "je Langwort" : "je Langwort, mit Pruefung");
+	}
+
+	return zod_blitkey_modus;
+}
+
+extern "C" void zod_blitkey_report(void)
+{
+	if(zod_blitkey_modus <= 0) return;
+
+	ZLOG("Schluesselblit je Langwort: %lu Aufrufe", zod_blitkey_lang);
+	if(zod_blitkey_modus == 2)
+		ZLOG(", %lu geprueft, %lu abweichend (muss 0 sein)", zod_blitkey_geprueft, zod_blitkey_falsch);
+	ZLOG("\n");
+}
 
 unsigned long zod_blit_key_calls   = 0;
 unsigned long zod_blit_rows        = 0;
@@ -1748,21 +1850,44 @@ int SDL_UpperBlit(SDL_Surface *src, SDL_Rect *srcrect,
 			return 0;
 		}
 
-		for(int y = 0; y < h; y++)
+		if(key == 0 && zod_blitkey_an())
 		{
-			const unsigned char *s = sp;
-			unsigned char *d = dp;
+			zod_blitkey_lang++;
 
-			for(int x = 0; x < w; x++)
+			if(zod_blitkey_modus == 2)
 			{
-				const unsigned char v = s[x];
+				/* alte Schleife auf eine Kopie des Zielrechtecks, neue auf das
+				 * Ziel, dann vergleichen */
+				unsigned char *tmp = (unsigned char*)malloc((size_t)w * h);
 
-				if(v != (unsigned char)key) d[x] = v;
+				if(tmp)
+				{
+					for(int y = 0; y < h; y++) memcpy(tmp + (size_t)y * w, dp + (size_t)y * dst->pitch, w);
+
+					zod_blit_key_bytes(tmp, sp, w, h, w, (int)src->pitch, 0);
+					zod_blit_key0_long(dp, sp, w, h, (int)dst->pitch, (int)src->pitch);
+
+					zod_blitkey_geprueft++;
+					for(int y = 0; y < h; y++)
+						if(memcmp(tmp + (size_t)y * w, dp + (size_t)y * dst->pitch, w))
+						{
+							if(zod_blitkey_falsch < 8)
+								ZLOG("Schluesselblit: Abweichung w=%d h=%d Zeile %d\n", w, h, y);
+							zod_blitkey_falsch++;
+							break;
+						}
+
+					free(tmp);
+					return 0;
+				}
 			}
 
-			sp += src->pitch;
-			dp += dst->pitch;
+			zod_blit_key0_long(dp, sp, w, h, (int)dst->pitch, (int)src->pitch);
+
+			return 0;
 		}
+
+		zod_blit_key_bytes(dp, sp, w, h, (int)dst->pitch, (int)src->pitch, (unsigned char)key);
 
 		return 0;
 	}
@@ -1942,3 +2067,126 @@ SDL_Surface *SDL_DisplayFormatAlpha(SDL_Surface *surface)
 }
 
 } /* extern "C" */
+
+/* --- Mikromessung der Blitwege (Warp F3, ZOD_BLITBENCH 1) ----------------
+ *
+ * Je Fall N Aufrufe in einer Schleife, EINE Uhrablesung davor und danach --
+ * eine Ablesung kostet selbst um 10 us, so viel wie ein Kachelblit, und ist
+ * deshalb als Fall A mitgemessen. Ziel ist die Zeichenflaeche (dirty_target),
+ * wie im Spiel; die beschmierten Bloecke sind als schmutzig vermerkt und
+ * werden im naechsten Bild neu gezeichnet. Einmal je Lauf. */
+#include "fineclock.h"
+
+static unsigned long zod_mb_us(unsigned long ticks, unsigned long n)
+{
+	const unsigned long f = zod_fineclock_freq();
+
+	if(!f || !n) return 0;
+
+	/* ns je Aufruf */
+	return (unsigned long)(((double)ticks * 1.0e9 / (double)f) / (double)n);
+}
+
+extern "C" void zod_blit_microbench(void)
+{
+	SDL_Surface *ziel = dirty_target;
+
+	if(!ziel || !ziel->pixels || ziel->format->BytesPerPixel != 1)
+	{
+		ZLOG("Blitmessung: keine 8-Bit-Zeichenflaeche\n");
+		return;
+	}
+
+	const unsigned long N = 20000;
+	SDL_Surface *k16  = SDL_CreateRGBSurface(0, 16, 16, 8, 0, 0, 0, 0);
+	SDL_Surface *k32  = SDL_CreateRGBSurface(0, 32, 32, 8, 0, 0, 0, 0);
+	SDL_Surface *kk16 = SDL_CreateRGBSurface(0, 16, 16, 8, 0, 0, 0, 0);
+	SDL_Surface *neben = SDL_CreateRGBSurface(0, ziel->w, ziel->h, 8, 0, 0, 0, 0);
+
+	if(!k16 || !k32 || !kk16 || !neben) { ZLOG("Blitmessung: kein Speicher\n"); return; }
+
+	for(int i = 0; i < 16 * 16; i++) ((unsigned char*)k16->pixels)[i] = (unsigned char)(1 + (i % 200));
+	for(int i = 0; i < 32 * 32; i++) ((unsigned char*)k32->pixels)[i] = (unsigned char)(1 + (i % 200));
+	for(int i = 0; i < 16 * 16; i++) ((unsigned char*)kk16->pixels)[i] = (unsigned char)(((i * 7) % 3) ? 1 + (i % 200) : 0);
+	SDL_SetColorKey(kk16, SDL_SRCCOLORKEY, 0);
+
+	SDL_Rect r;
+	unsigned long t0, t1;
+	volatile unsigned long senke = 0;
+
+#define ZOD_MB_POS(i) do { r.x = (Sint16)(64 + ((i) * 16) % 448); r.y = (Sint16)(48 + (((i) / 28) * 16) % 320); r.w = 0; r.h = 0; } while(0)
+
+	/* A: Uhr */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) senke += zod_fineclock_ticks();
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung A ReadEClock: %lu ns je Aufruf\n", zod_mb_us(t1 - t0, N));
+
+	/* B: leere Schleife mit Positionsrechnung */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) { ZOD_MB_POS(i); senke += r.x; }
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung B leere Schleife: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* C: SDL_UpperBlit 16x16 deckend auf die Zeichenflaeche */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) { ZOD_MB_POS(i); SDL_UpperBlit(k16, 0, ziel, &r); }
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung C UpperBlit 16x16 deckend, Zeichenflaeche: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* D: dasselbe auf eine Nebenflaeche (ohne Schmutzvermerk) */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) { ZOD_MB_POS(i); SDL_UpperBlit(k16, 0, neben, &r); }
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung D UpperBlit 16x16 deckend, Nebenflaeche: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* E: nur die Kopie */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++)
+	{
+		ZOD_MB_POS(i);
+		zod_copy_rect((unsigned char*)ziel->pixels + r.y * ziel->pitch + r.x,
+		              (const unsigned char*)k16->pixels, 16, 16, (int)ziel->pitch, 16);
+	}
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung E nur zod_copy_rect 16x16: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* F: nur der Schmutzvermerk */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) { ZOD_MB_POS(i); dirty_mark(ziel, r.x, r.y, 16, 16); }
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung F nur dirty_mark 16x16: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* G: nur das Beschneiden */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++)
+	{
+		int sx, sy, dx, dy, w, h;
+
+		ZOD_MB_POS(i);
+		senke += clip_blit(k16, 0, ziel, &r, &sx, &sy, &dx, &dy, &w, &h);
+	}
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung G nur clip_blit: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* H: 32x32 deckend */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) { ZOD_MB_POS(i); SDL_UpperBlit(k32, 0, ziel, &r); }
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung H UpperBlit 32x32 deckend: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+	/* I: 16x16 mit Schluessel */
+	t0 = zod_fineclock_ticks();
+	for(unsigned long i = 0; i < N; i++) { ZOD_MB_POS(i); SDL_UpperBlit(kk16, 0, ziel, &r); }
+	t1 = zod_fineclock_ticks();
+	ZLOG("Blitmessung I UpperBlit 16x16 mit Schluessel: %lu ns\n", zod_mb_us(t1 - t0, N));
+
+#undef ZOD_MB_POS
+
+	(void)senke;
+
+	SDL_FreeSurface(k16);
+	SDL_FreeSurface(k32);
+	SDL_FreeSurface(kk16);
+	SDL_FreeSurface(neben);
+}

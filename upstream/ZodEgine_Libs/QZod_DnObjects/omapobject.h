@@ -12,6 +12,7 @@ class QZOD_DNOBJECTSSHARED_EXPORT OMapObject : public ZObject
 
 		void DoRender(ZMap &the_map, SDL_Surface *dest, int shift_x = 0, int shift_y = 0);
 		int Process();
+		bool ProcessNoop() const { return true; }   /* Process gibt nur 0 zurueck */
 
 		void SetOwner(team_type owner_);
 		void SetMapImpassables(ZMap &tmap);

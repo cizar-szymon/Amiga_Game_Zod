@@ -282,6 +282,31 @@ void ORock::BakeShadow(ZMap &the_map)
 		}
 }
 
+void ORock::BakeTop(ZMap &the_map)
+{
+	int &x = loc.x;
+	int &y = loc.y;
+
+	/* genau wie DoRender: render_img[0][j] bei x, y + 0/16/32 */
+	for(int j = 0, ys = 0; j < 3; j++, ys += 16)
+		if(render_img[0][j] && render_img[0][j]->GetBaseSurface())
+			the_map.PermStamp(x, y + ys, render_img[0][j], false);
+}
+
+void ORock::BakeClip(ZMap &the_map, int welche, int cx0, int cy0, int cx1, int cy1)
+{
+	int &x = loc.x;
+	int &y = loc.y;
+
+	/* welche 0: Schatten wie BakeShadow (bei x+16), 1: Kopf wie BakeTop (bei x) */
+	const int k = welche ? 0 : 1;
+	const int xs = welche ? x : x + 16;
+
+	for(int j = 0, ys = 0; j < 3; j++, ys += 16)
+		if(render_img[k][j] && render_img[k][j]->GetBaseSurface())
+			the_map.PermStampClip(xs, y + ys, render_img[k][j], cx0, cy0, cx1, cy1);
+}
+
 void ORock::DoPreRender(ZMap &the_map, SDL_Surface *dest, int shift_x, int shift_y)
 {
 	/* Eingebacken? Dann steht der Schatten schon in der Kartenflaeche. */

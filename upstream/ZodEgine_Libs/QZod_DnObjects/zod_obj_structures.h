@@ -246,6 +246,21 @@ public:
         portrait_anim_ref_id = -1;
         portrait_anim_value = -1;
     }
+
+    /* Nichts gesetzt, was ZServer::ProcessObjects auswertet (Warp F3,
+     * nur fuer die Pruefung ZOD_INERTCHECK). */
+    bool quiet() const
+    {
+        return !updated_location && !updated_velocity && !updated_waypoints &&
+               !updated_attack_object && !updated_attack_object_health &&
+               !updated_attack_object_driver_health && !updated_open_lid &&
+               !fired_missile && entered_target_ref_id == -1 && !build_unit &&
+               !auto_repair && !set_crane_anim && entered_repair_building_ref_id == -1 &&
+               !repair_unit && destroy_fort_building_ref_id == -1 &&
+               !updated_grenade_amount && !updated_leader_grenade_amount &&
+               delete_grenade_box_ref_id == -1 && !do_pickup_grenade_anim &&
+               portrait_anim_ref_id == -1;
+    }
 };
 
 

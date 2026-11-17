@@ -1,4 +1,17 @@
 #include "zobject.h"
+#include "fineclock.h"   /* Warp F3: Messung je Objektart (ZServer) */
+
+/* Warp F3, Messung: Kosten von CheckPassiveEngage.
+ * Zaehler laufen immer (billig), die Zeit nur in Messbildern
+ * (zod_prof_frame, gesetzt von ZServer::ProcessObjects). */
+extern "C" {
+int           zod_prof_frame = 0;
+unsigned long zod_pe_aufrufe = 0;    /* Aufrufe ueberhaupt                     */
+unsigned long zod_pe_suchen = 0;     /* davon ueber die 0,5-s-Sperre hinaus    */
+unsigned long zod_pe_paare = 0;      /* Durchlaeufe ueber passive_engagable    */
+unsigned long zod_pe_ticks = 0;      /* Zeit in Messbildern                    */
+unsigned long zod_pe_gemessen = 0;   /* gemessene Aufrufe (je 2 Uhrablesungen) */
+}
 
 ZSettings ZObject::default_zsettings;
 
@@ -1458,6 +1471,7 @@ int ZObject::ProcessServer(ZMap &tmap, ZOLists &ols)
 
 	time_dif = the_time - last_process_server_time;
 	last_process_server_time = the_time;
+	server_skipped = false;
 
 	sflags.clear();
 
@@ -1552,7 +1566,17 @@ int ZObject::ProcessServer(ZMap &tmap, ZOLists &ols)
 	}
 
 	//see if they want to attack someone nearby
-	CheckPassiveEngage(the_time, ols);
+	zod_pe_aufrufe++;
+	if(zod_prof_frame)
+	{
+		const unsigned long t0 = zod_fineclock_ticks();
+
+		CheckPassiveEngage(the_time, ols);
+		zod_pe_ticks += zod_fineclock_ticks() - t0;
+		zod_pe_gemessen++;
+	}
+	else
+		CheckPassiveEngage(the_time, ols);
 
 	//let them do their damage
 	ProcessAttackDamage(tmap, attack_player_given);
@@ -1622,6 +1646,8 @@ void ZObject::CheckPassiveEngage(double &the_time, ZOLists &ols)
 	//set for next time
 	next_check_passive_attack_time = the_time + 0.5;
 
+	zod_pe_suchen++;
+
 	//can we even attack
 	if(!CanAttack()) return;
 	if(owner == NULL_TEAM) return;
@@ -1656,6 +1682,8 @@ void ZObject::CheckPassiveEngage(double &the_time, ZOLists &ols)
 	{
 		int ox, oy;
 		unsigned char ot, oid;
+
+		zod_pe_paare++;
 
 		(*obj)->GetObjectID(ot, oid);
 		(*obj)->GetCenterCords(ox, oy);
@@ -4945,6 +4973,7 @@ void ZOLists::DeleteAllObjects()
         delete *o;
 
     //clear the lists
+    version++;
     object_list->clear();
     flag_olist.clear();
     cannon_olist.clear();
@@ -4962,6 +4991,7 @@ void ZOLists::DeleteAllObjects()
 
 void ZOLists::RemoveObject(ZObject *obj)
 {
+    version++;
     RemoveObjectFromList(obj, object_list);
     RemoveObjectFromList(obj, &flag_olist);
     RemoveObjectFromList(obj, &cannon_olist);
@@ -5051,6 +5081,7 @@ extern "C" void zod_objart_report(void)
 
 void ZOLists::AddObject(ZObject *obj)
 {
+    version++;
     //already exist?
     zod_lauf_add++;
     zod_lauf_elem += (unsigned long)object_list->size();

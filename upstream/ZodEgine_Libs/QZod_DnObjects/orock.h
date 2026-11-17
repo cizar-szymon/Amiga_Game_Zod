@@ -27,6 +27,7 @@ class QZOD_DNOBJECTSSHARED_EXPORT ORock : public ZObject
 		bool PreRenderBanded() const { return true; }
 		void DoRender(ZMap &the_map, SDL_Surface *dest, int shift_x = 0, int shift_y = 0);
 		int Process();
+		bool ProcessNoop() const { return true; }   /* Process gibt nur 1 zurueck */
 		void SetOwner(team_type owner_);
 		void DoDeathEffect(bool do_fire_death, bool do_missile_death);
 		void SetMapImpassables(ZMap &tmap);
@@ -38,6 +39,9 @@ class QZOD_DNOBJECTSSHARED_EXPORT ORock : public ZObject
 		/* Die drei Schattenkacheln einmalig in die Kartenflaeche stempeln. */
 		void BakeShadow(ZMap &the_map);
 		void BakePreRender(ZMap &the_map) { BakeShadow(the_map); }
+		/* Warp F3: die drei Kopfkacheln (das, was DoRender zeichnet). */
+		void BakeTop(ZMap &the_map);
+		void BakeClip(ZMap &the_map, int welche, int cx0, int cy0, int cx1, int cy1);
 		void SetDefaultRender();
 		void ClearRender();
 

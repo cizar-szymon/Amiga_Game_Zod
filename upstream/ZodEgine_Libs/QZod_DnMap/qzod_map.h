@@ -86,8 +86,25 @@ class QZOD_DNMAPSHARED_EXPORT ZMap
          * zeichnen -- damit ein eingebackener Schatten wieder verschwindet. */
         void RockShadowClear(int x0, int y0, int x1, int y1);
 
+        /* Warp F3: Meldung "Kartenflaeche in diesem Punktbereich neu
+         * beschrieben" (PermStamp, ChangeTile). ZPlayer stempelt dort die
+         * eingebackenen Steinkoepfe neu, damit sie ueber Kratern usw. bleiben
+         * -- wie beim Zeichnen je Bild. */
+        /* Warp F3: die Bereiche, die RockShadowClear seit dem letzten
+         * Einbacken frisch gezeichnet hat (je vier Werte x0 y0 x1 y1) --
+         * ZPlayer backt dann nur dort neu statt der ganzen Karte. */
+        const vector<int> &RockRegions() const { return rock_regions; }
+        void RockRegionsClear() { rock_regions.clear(); }
+        void RockRegionAdd(int x0, int y0, int x1, int y1)
+        { rock_regions.push_back(x0); rock_regions.push_back(y0); rock_regions.push_back(x1); rock_regions.push_back(y1); }
+        typedef void (*stamp_hook_t)(void *ctx, int x, int y, int w, int h);
+        void SetStampHook(stamp_hook_t f, void *ctx) { stamp_hook = f; stamp_ctx = ctx; }
+
         bool PermStamp(int x_, int y_, ZSDL_Surface *surface, bool mark_stamped = true);
         bool PermStamp(int x_, int y_, SDL_Surface *surface, bool mark_stamped = true);
+        /* Warp F3: nur innerhalb cx0..cx1-1, cy0..cy1-1 stempeln, ohne
+         * Stempelmeldung (Steine oertlich nachbacken). */
+        void PermStampClip(int x_, int y_, ZSDL_Surface *surface, int cx0, int cy0, int cx1, int cy1);
         vector<map_effect_info> &GetMapWaterList() { return map_water_list; }
         void CreateCrater(int x, int y, bool is_big, double chance = 1.0);
         int CoordCraterType(int tx, int ty);
@@ -238,6 +255,9 @@ class QZOD_DNMAPSHARED_EXPORT ZMap
         int view_w, view_h;
         /* Steinschatten: Stand der Welt gegen Stand der Kartenflaeche. */
         unsigned long rock_gen = 0;
+        stamp_hook_t stamp_hook = nullptr;
+        vector<int> rock_regions;
+        void *stamp_ctx = nullptr;
         unsigned long rock_baked_gen = ~0UL;
         double last_shift_time;
         double shift_overflow;

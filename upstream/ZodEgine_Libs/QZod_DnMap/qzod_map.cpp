@@ -516,6 +516,7 @@ void ZMap::RenderMap()
      * was darin eingebacken war, ist weg. Ohne dieses Zuruecksetzen blieben
      * die Schatten nach dem ersten Kartenwechsel fuer immer unsichtbar. */
     rock_baked_gen = ~0UL;
+    rock_regions.clear();
 
 #ifdef __amigaos__
     /* Beim Kartenwechsel den Kopf-Pool zurueckgeben: der naechste Level hat
@@ -616,6 +617,11 @@ void ZMap::RenderMap()
 void ZMap::RockShadowClear(int x0, int y0, int x1, int y1)
 {
     if(!full_render.GetBaseSurface()) return;
+
+    rock_regions.push_back(x0);
+    rock_regions.push_back(y0);
+    rock_regions.push_back(x1);
+    rock_regions.push_back(y1);
 
     int tx0 = x0 / 16, ty0 = y0 / 16;
     int tx1 = x1 / 16, ty1 = y1 / 16;
@@ -1354,7 +1360,17 @@ void ZMap::ChangeTile(unsigned int index, map_tile new_tile)
 
     //rerender
     if(full_render.GetBaseSurface())
+    {
         RenderTile(index);
+
+        if(stamp_hook)
+        {
+            int tx, ty;
+
+            GetTile(index, tx, ty);
+            stamp_hook(stamp_ctx, tx, ty, 16, 16);
+        }
+    }
 }
 
 map_basics &ZMap::GetMapBasics()
@@ -2242,7 +2258,35 @@ bool ZMap::PermStamp(int x_, int y_, ZSDL_Surface *surface, bool mark_stamped)
     surface->BlitSurface(nullptr, &to_rect, &full_render);
     //SDL_BlitSurface( surface, nullptr, full_render, &to_rect);
 
+    if(stamp_hook) stamp_hook(stamp_ctx, x_, y_, surface->GetBaseSurface()->w, surface->GetBaseSurface()->h);
+
     return true;
+}
+
+void ZMap::PermStampClip(int x_, int y_, ZSDL_Surface *surface, int cx0, int cy0, int cx1, int cy1)
+{
+    if(!full_render.GetBaseSurface() || !surface || !surface->GetBaseSurface()) return;
+
+    SDL_Surface *s = surface->GetBaseSurface();
+    const int x0 = x_ > cx0 ? x_ : cx0;
+    const int y0 = y_ > cy0 ? y_ : cy0;
+    const int x1 = (x_ + s->w) < cx1 ? (x_ + s->w) : cx1;
+    const int y1 = (y_ + s->h) < cy1 ? (y_ + s->h) : cy1;
+
+    if(x1 <= x0 || y1 <= y0) return;
+
+    SDL_Rect from_rect, to_rect;
+
+    from_rect.x = static_cast<Sint16>(x0 - x_);
+    from_rect.y = static_cast<Sint16>(y0 - y_);
+    from_rect.w = static_cast<Uint16>(x1 - x0);
+    from_rect.h = static_cast<Uint16>(y1 - y0);
+    to_rect.x = static_cast<Sint16>(x0);
+    to_rect.y = static_cast<Sint16>(y0);
+    to_rect.w = 0;
+    to_rect.h = 0;
+
+    surface->BlitSurface(&from_rect, &to_rect, &full_render);
 }
 
 bool ZMap::PermStamp(int x_, int y_, SDL_Surface *surface, bool mark_stamped)
@@ -2259,6 +2303,9 @@ bool ZMap::PermStamp(int x_, int y_, SDL_Surface *surface, bool mark_stamped)
     to_rect.y = static_cast<Sint16>(y_);
 
     full_render.BlitOnToMe(nullptr, &to_rect, surface);
+
+    if(stamp_hook) stamp_hook(stamp_ctx, x_, y_, surface->w, surface->h);
+
     return true;
 }
 
