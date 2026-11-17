@@ -442,6 +442,10 @@ static void out_mark(int x, int y, int w, int h)
 			out_grid[by][bx] = 1;
 }
 
+/* schirmfeste Rechtecke (Definition bei dirty_mark) */
+struct zod_rechteck;
+static zod_rechteck *fest_vor_liste(int *n);
+
 /* Aus ZMap::DoRender, wenn sich NUR der Ausschnitt verschoben hat.
  * dx/dy: Verschiebung der Karte in Punkten (shift neu - shift alt), R in
  * Schirmkoordinaten. Rueckgabe 1 = uebernommen, 0 = voller Weg wie bisher. */
@@ -531,6 +535,16 @@ extern "C" int zod_dirty_scroll(int dx, int dy, int rx, int ry, int rw, int rh)
 
 			out_mark(x0 - dx, y0 - dy, x1 - x0, y1 - y0);
 		}
+	}
+
+	/* 3. schirmfeste Rechtecke des letzten Bildes: der Blit spart sie aus,
+	 *    also muessen sie kopiert werden (verschwundene Meldung) */
+	{
+		int fn = 0;
+		const zod_rechteck *fv = fest_vor_liste(&fn);
+
+		for(int i = 0; i < fn; i++)
+			out_mark(fv[i].x - 2, fv[i].y - 2, fv[i].w + 4, fv[i].h + 4);
 	}
 
 	/* 1. freigelegte Streifen */
@@ -641,6 +655,165 @@ static inline void od_mark(int x, int y, int w, int h)
 			od_grid[cy][cx] = 1;
 }
 
+/* Warp: SCHIRMFESTE Rechtecke (Pausenbild, Meldungen, Fenster, Zeiger,
+ * Bildrate). Sie bewegen sich beim Scrollen NICHT mit der Karte. Der
+ * Blitter verschiebt das Bild aber im SICHTBAREN Grafikspeicher -- bis die
+ * CPU sie neu hineinkopiert, standen sie fuer einen Teil des Bildes am
+ * falschen Platz (vom Nutzer als Flackern und "alter Platz" des
+ * "Click to Resume" gesehen). Deshalb spart der Scrollblit diese Rechtecke
+ * und ihre verschobenen Abbilder aus (zod_scroll_teile), die CPU kopiert sie
+ * wie bisher. ZPlayer klammert das Zeichnen mit zod_fest_begin/end. */
+enum { ZOD_FEST = 128 };
+static zod_rechteck fest_a[ZOD_FEST], fest_b[ZOD_FEST];
+static zod_rechteck *fest_jetzt = fest_a, *fest_vor = fest_b;
+static int fest_jetzt_n = 0, fest_vor_n = 0, fest_jetzt_voll = 0, fest_vor_voll = 0;
+static int fest_an = 0;
+unsigned long zod_scroll_teile_bilder = 0, zod_scroll_teile_summe = 0, zod_scroll_teile_voll = 0;
+
+static zod_rechteck *fest_vor_liste(int *n) { *n = fest_vor_n; return fest_vor; }
+
+extern "C" void zod_fest_begin(void) { fest_an = 1; }
+extern "C" void zod_fest_end(void)   { fest_an = 0; }
+
+static inline void fest_merken(int x, int y, int w, int h)
+{
+	if(fest_jetzt_n >= ZOD_FEST) { fest_jetzt_voll = 1; return; }
+
+	zod_rechteck &r = fest_jetzt[fest_jetzt_n++];
+
+	r.x = (short)x; r.y = (short)y; r.w = (short)w; r.h = (short)h;
+}
+
+static void fest_tauschen(void)
+{
+	zod_rechteck *t = fest_vor;
+
+	fest_vor = fest_jetzt;
+	fest_jetzt = t;
+	fest_vor_n = fest_jetzt_n;
+	fest_vor_voll = fest_jetzt_voll;
+	fest_jetzt_n = 0;
+	fest_jetzt_voll = 0;
+}
+
+/* Zielflaeche des Scrollblits (zx,zy,bw,bh; Quelle = Ziel + dx,dy) ohne die
+ * schirmfesten Rechtecke: F des letzten Bildes (steht im Grafikspeicher),
+ * F - d (dorthin wuerde es verschoben) und F dieses Bildes (wird ohnehin
+ * kopiert). Ergebnis als Baender nach y, je Band Stuecke nach x, und zwar
+ * in der Reihenfolge, in der kein Stueck eine Quelle ueberschreibt, die ein
+ * spaeteres noch liest (Quelle liegt in Richtung d: zuerst die Stuecke auf
+ * der Seite, aus der gelesen wird). Rueckgabe: Zahl der Stuecke, 0 = nichts
+ * auszusparen (ein Blit wie bisher), -1 = zu viele (ein Blit wie bisher). */
+extern "C" int zod_scroll_teile(int zx, int zy, int bw, int bh, int dx, int dy,
+                                short *teile, int max)
+{
+	enum { MAXEX = 3 * ZOD_FEST };
+	static short ex[MAXEX][4];
+	int nex = 0;
+
+	if(fest_vor_voll || fest_jetzt_voll) { zod_scroll_teile_voll++; return -1; }
+
+	const int zx1 = zx + bw, zy1 = zy + bh;
+
+	for(int liste = 0; liste < 3; liste++)
+	{
+		const zod_rechteck *l = (liste == 2) ? fest_jetzt : fest_vor;
+		const int n = (liste == 2) ? fest_jetzt_n : fest_vor_n;
+		const int vx = (liste == 1) ? -dx : 0, vy = (liste == 1) ? -dy : 0;
+
+		for(int i = 0; i < n && nex < MAXEX; i++)
+		{
+			int x0 = l[i].x - 2 + vx, y0 = l[i].y - 2 + vy;
+			int x1 = l[i].x + l[i].w + 2 + vx, y1 = l[i].y + l[i].h + 2 + vy;
+
+			if(x0 < zx) x0 = zx;
+			if(y0 < zy) y0 = zy;
+			if(x1 > zx1) x1 = zx1;
+			if(y1 > zy1) y1 = zy1;
+			if(x1 <= x0 || y1 <= y0) continue;
+
+			ex[nex][0] = (short)x0; ex[nex][1] = (short)y0;
+			ex[nex][2] = (short)x1; ex[nex][3] = (short)y1;
+			nex++;
+		}
+	}
+
+	if(!nex) return 0;
+
+	/* Bandgrenzen */
+	static short yc[2 * MAXEX + 2];
+	int ny = 0;
+
+	yc[ny++] = (short)zy;
+	yc[ny++] = (short)zy1;
+	for(int i = 0; i < nex; i++) { yc[ny++] = ex[i][1]; yc[ny++] = ex[i][3]; }
+
+	for(int i = 1; i < ny; i++)   /* einfuegend sortieren, wenige Werte */
+	{
+		short v = yc[i];
+		int j = i;
+
+		while(j > 0 && yc[j - 1] > v) { yc[j] = yc[j - 1]; j--; }
+		yc[j] = v;
+	}
+
+	int nt = 0;
+	const int nb = ny - 1;
+
+	for(int bi = 0; bi < nb; bi++)
+	{
+		const int b = (dy >= 0) ? bi : (nb - 1 - bi);
+		const int ya = yc[b], yb = yc[b + 1];
+
+		if(yb <= ya) continue;
+
+		/* Ausschluesse dieses Bandes (decken es wegen der Grenzen ganz) */
+		static short xa[MAXEX], xe[MAXEX];
+		int nx = 0;
+
+		for(int i = 0; i < nex; i++)
+			if(ex[i][1] <= ya && ex[i][3] >= yb) { xa[nx] = ex[i][0]; xe[nx] = ex[i][2]; nx++; }
+
+		for(int i = 1; i < nx; i++)
+		{
+			short a = xa[i], e = xe[i];
+			int j = i;
+
+			while(j > 0 && xa[j - 1] > a) { xa[j] = xa[j - 1]; xe[j] = xe[j - 1]; j--; }
+			xa[j] = a; xe[j] = e;
+		}
+
+		/* freie Stuecke von links nach rechts sammeln */
+		static short sa[MAXEX + 1], se[MAXEX + 1];
+		int ns = 0, cur = zx;
+
+		for(int i = 0; i < nx; i++)
+		{
+			if(xa[i] > cur) { sa[ns] = (short)cur; se[ns] = xa[i]; ns++; }
+			if(xe[i] > cur) cur = xe[i];
+		}
+		if(cur < zx1) { sa[ns] = (short)cur; se[ns] = (short)zx1; ns++; }
+
+		for(int k = 0; k < ns; k++)
+		{
+			const int s = (dx >= 0) ? k : (ns - 1 - k);
+
+			if(nt >= max) { zod_scroll_teile_voll++; return -1; }
+
+			teile[nt * 4 + 0] = sa[s];
+			teile[nt * 4 + 1] = (short)ya;
+			teile[nt * 4 + 2] = (short)(se[s] - sa[s]);
+			teile[nt * 4 + 3] = (short)(yb - ya);
+			nt++;
+		}
+	}
+
+	zod_scroll_teile_bilder++;
+	zod_scroll_teile_summe += (unsigned long)nt;
+
+	return nt;
+}
+
 /* Einen beschriebenen Bereich vermerken. Nur fuer die Zeichenflaeche --
  * Blits in Karten- oder Zwischenflaechen gehen den Schirm nichts an. */
 static inline void dirty_mark(SDL_Surface *dst, int x, int y, int w, int h)
@@ -648,6 +821,7 @@ static inline void dirty_mark(SDL_Surface *dst, int x, int y, int w, int h)
 	if(dst != dirty_target || w <= 0 || h <= 0) return;
 
 	if(od_an && !im_restore) od_mark(x, y, w, h);
+	if(fest_an && !im_restore) fest_merken(x, y, w, h);
 
 	if(!grid_w) return;
 
@@ -907,6 +1081,7 @@ extern "C" void zod_dirty_clear(void)
 	grid_alles(out_grid, 0);
 
 	rechteck_tauschen();
+	fest_tauschen();
 
 	prev_gueltig = 1;
 }

@@ -651,7 +651,14 @@ void run_single_player()
 
         //Messlauf: nach 100 Bildern ohne Mausklick freigeben (Warp-Messungen
         //ueber AmiAgent, das nur Tasten senden kann)
-        if(measure && frames == 100) zserver.BenchResume();
+        //ZOD_BENCHPAUSE 1: angehalten lassen (Pruefung des Pausenbildes)
+        if(measure && frames == 100)
+        {
+            char pb[8];
+
+            if(!(zod_env("ZOD_BENCHPAUSE", pb, sizeof(pb)) && pb[0] == '1'))
+                zserver.BenchResume();
+        }
 
         //AmigaOS: Strg-C beendet sauber (auf anderen Systemen wirkungslos)
         if(zod_amiga_break())

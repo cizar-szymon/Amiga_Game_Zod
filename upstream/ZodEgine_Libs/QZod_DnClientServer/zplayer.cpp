@@ -29,6 +29,8 @@ using namespace COMMON;
 /* Warp F3, Steinkoepfe (Definitionen bei RenderObjects) */
 static int zod_rockbake_modus(void);
 extern "C" void zod_overdraw_begin(void);
+extern "C" void zod_fest_begin(void);   /* schirmfest gezeichnet (Scrollblit) */
+extern "C" void zod_fest_end(void);
 
 void selection_info::DeleteObject(ZObject *obj)
 {
@@ -2854,6 +2856,10 @@ void ZPlayer::RenderScreen()
 		//render objects (teilt sich selbst weiter auf)
 		RenderObjects();
 
+		/* Warp: ab hier ist alles schirmfest (bewegt sich beim Scrollen nicht
+		 * mit der Karte) -- der Scrollblit spart es aus. */
+		zod_fest_begin();
+
 		//mouse stuff
 		RenderMouse();
 		RenderPreviousCursor();
@@ -2890,7 +2896,9 @@ void ZPlayer::RenderScreen()
 		zod_rsec_end(RSEC_GUI);
 
 		//(almost)last because opengl uses it to render over overflows
+		zod_fest_end();   /* die Anzeige liegt ausserhalb des Kartenausschnitts */
 		zhud.DoRender(screen, init_w, init_h);
+		zod_fest_begin();
 
 		zod_rsec_end(RSEC_HUD);
 
@@ -2923,6 +2931,8 @@ void ZPlayer::RenderScreen()
 				}
 			}
 		}
+
+		zod_fest_end();
 
 		zod_rsec_end(RSEC_ZEIGER);
 

@@ -60,6 +60,7 @@ extern "C" void zod_dirty_restore_end(void);
 extern "C" int  zod_dirty_out_zeile(int blockzeile);
 /* Scrollen mit dem Blitter (sdl_video.cpp) */
 extern "C" int  zod_dirty_scroll_get(int *dx, int *dy, int *rx, int *ry, int *rw, int *rh);
+extern "C" int  zod_scroll_teile(int zx, int zy, int bw, int bh, int dx, int dy, short *teile, int max);
 extern "C" void zod_dirty_scroll_done(void);
 extern "C" void zod_dirty_out_mark(int x, int y, int w, int h);
 extern unsigned long zod_scroll_blits, zod_scroll_abgelehnt, zod_scroll_grund[6];
@@ -413,6 +414,12 @@ void zod_flip_report(void)
 	     zod_scroll_grund[4], zod_scroll_grund[5]);
 	ZLOG("Scrollen: %lu mal genaue Rechtecke, %lu mal Bloecke (Liste voll)\n",
 	     zod_scroll_genau, zod_scroll_block);
+	{
+		extern unsigned long zod_scroll_teile_bilder, zod_scroll_teile_summe, zod_scroll_teile_voll;
+
+		ZLOG("Scrollen: %lu mal mit ausgesparten schirmfesten Rechtecken (%lu Blits), %lu mal zu viele\n",
+		     zod_scroll_teile_bilder, zod_scroll_teile_summe, zod_scroll_teile_voll);
+	}
 
 	if(zod_scroll_blits)
 		ZLOG("Scrollen je Bild: %lu Vor-Rechtecke, Ausgabebloecke %lu in der Karte,"
@@ -1163,8 +1170,17 @@ int SDL_Flip(SDL_Surface *screen)
 				if(bw > 0 && bh > 0)
 				{
 					struct BitMap *bm = screen_ptr->RastPort.BitMap;
+					/* schirmfeste Rechtecke aussparen (sdl_video.cpp) */
+					static short teile[4 * 256];
+					const int nt = zod_scroll_teile(zx, zy, bw, bh, sdx, sdy, teile, 256);
 
-					BltBitMap(bm, qx, qy, bm, zx, zy, bw, bh, 0xC0, 0xFF, 0);
+					if(nt <= 0)
+						BltBitMap(bm, qx, qy, bm, zx, zy, bw, bh, 0xC0, 0xFF, 0);
+					else
+						for(int t = 0; t < nt; t++)
+							BltBitMap(bm, teile[t * 4] + sdx, teile[t * 4 + 1] + sdy, bm,
+							          teile[t * 4], teile[t * 4 + 1], teile[t * 4 + 2], teile[t * 4 + 3],
+							          0xC0, 0xFF, 0);
 					WaitBlit();
 				}
 			}
