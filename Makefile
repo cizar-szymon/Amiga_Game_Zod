@@ -482,6 +482,15 @@ $(BUILD)/ZodLaunch: launcher/zodlaunch.c
 	@mkdir -p $(dir $@)
 	$(CC) -noixemul $(CPUFLAGS) -O2 -I$(AMIGA_SDL_INC) $< -o $@ -lmui -lamiga
 
+# --- jvplay: Filme der Z-CD (Bitmap Brothers JV), Warp ---
+# Eigenstaendig: reines C, keine Engine-Quellen. port/jv/jvdec.c ist der
+# plattformfreie Dekoder (auf dem PC mit jvdump gegen FFmpeg geprueft).
+JVPLAY_SRC := port/jv/jvplay_amiga.c port/jv/jvdec.c
+jvplay: $(BUILD)/jvplay
+$(BUILD)/jvplay: $(JVPLAY_SRC) port/jv/jvdec.h
+	@mkdir -p $(dir $@)
+	$(CC) -noixemul $(CPUFLAGS) -O2 -std=gnu99 -Iport/jv -I$(AMIGA_SDL_INC) $(JVPLAY_SRC) -o $@ -lamiga
+
 # --- ZExtract: Spieldaten von der Original-CD holen ---
 # Eigenstaendig wie der Launcher: reines C, keine Engine-Quellen, keine
 # Bibliothek ausser dos.library und exec. tables.c ist erzeugt
