@@ -181,14 +181,26 @@ void zod_mem_report_exit(void)
 	     ((long)total - (long)mem_at_start) / 1024);
 }
 
+/* Auf 16 Byte ausgerichtet (Warp, 16.11.2026): AllocVec liefert nur 8, und
+ * die VRAM-Kopie per MOVE16 (fastcopy.cpp) braucht Quelle und Ziel auf
+ * derselben Lage in der 16-Byte-Zeile. Der Originalzeiger liegt im
+ * Langwort direkt vor dem ausgerichteten Block. */
 void *zod_big_alloc(unsigned long size)
 {
-	return AllocVec(size, MEMF_ANY);
+	unsigned char *roh = (unsigned char *)AllocVec(size + 16 + sizeof(void *), MEMF_ANY);
+
+	if(!roh) return 0;
+
+	unsigned char *a = (unsigned char *)(((unsigned long)roh + sizeof(void *) + 15) & ~15UL);
+
+	((void **)a)[-1] = roh;
+
+	return a;
 }
 
 void zod_big_free(void *block)
 {
-	if(block) FreeVec(block);
+	if(block) FreeVec(((void **)block)[-1]);
 }
 
 #else /* andere Plattformen */

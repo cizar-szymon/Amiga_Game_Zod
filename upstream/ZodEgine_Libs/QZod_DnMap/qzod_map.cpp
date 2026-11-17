@@ -14,6 +14,9 @@
 /* port/amiga/sdl_video.cpp -- Schmutzspur des VORIGEN Bildes */
 extern "C" int  zod_dirty_partial_ok(void);
 extern "C" void zod_dirty_force_full(void);
+extern "C" int  zod_dirty_scroll(int dx, int dy, int rx, int ry, int rw, int rh);
+extern "C" void zod_dirty_scrollblit_begin(void);
+extern "C" void zod_dirty_scrollblit_end(void);
 /* port/amiga/sdl_video.cpp -- Freiliste der Flaechenkoepfe */
 extern "C" void zod_kopf_pool_leeren(void);
 extern "C" int  zod_dirty_prev_runs(int blockzeile, short *x0, short *x1, int max);
@@ -339,10 +342,42 @@ void ZMap::DoRender(SDL_Surface *dest, int shift_x_dest, int shift_y_dest)
                                  view_w  != letzte_view_w  ||
                                  view_h  != letzte_view_h);
 
+        /* Warp: reine Verschiebung bei kartenfuellendem Ausschnitt -> der
+         * Blitter schiebt den Ausschnitt im Grafikspeicher, kopiert werden
+         * nur Streifen und Objekte (port/amiga/sdl_video.cpp,
+         * zod_dirty_scroll). Sonst wie bisher alles. */
+        bool blitscroll = false;
+
+        if(verschoben && view_w == letzte_view_w && view_h == letzte_view_h &&
+           letzter_shift_x >= 0 && letzter_shift_y >= 0 &&
+           shift_x >= 0 && shift_y >= 0)
+            blitscroll = zod_dirty_scroll(shift_x - letzter_shift_x,
+                                          shift_y - letzter_shift_y,
+                                          shift_x_dest, shift_y_dest,
+                                          view_w, view_h) != 0;
+
         letzter_shift_x = shift_x;
         letzter_shift_y = shift_y;
         letzte_view_w = view_w;
         letzte_view_h = view_h;
+
+        if(blitscroll)
+        {
+            /* Voller Hintergrund in die Zeichenflaeche, aber OHNE Vermerk:
+             * im Grafikspeicher hat ihn der Blitter schon hingeschoben. */
+            from_rect.x = static_cast<short>(shift_x);
+            from_rect.y = static_cast<short>(shift_y);
+            from_rect.w = static_cast<Uint16>(view_w);
+            from_rect.h = static_cast<Uint16>(view_h);
+            to_rect.x = static_cast<short>(shift_x_dest);
+            to_rect.y = static_cast<short>(shift_y_dest);
+
+            zod_dirty_scrollblit_begin();
+            GetRender().BlitSurface(&from_rect, &to_rect);
+            zod_dirty_scrollblit_end();
+
+            return;
+        }
 
         if(verschoben)
             zod_dirty_force_full();

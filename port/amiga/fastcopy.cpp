@@ -45,6 +45,9 @@ extern struct ExecBase *SysBase;
 #ifndef AFB_68080
 #define AFB_68080 10
 #endif
+#ifndef AFF_68060
+#define AFF_68060 (1L << 7)
+#endif
 
 #ifdef ZOD_AMMX
 /* port/amiga/ammx_blit.s -- nur im 68080-Bau gebunden. Ein 040/060-Bau
@@ -166,6 +169,99 @@ static void rect_ammx(unsigned char *d, const unsigned char *s,
 }
 #endif
 
+/* ---- VRAM-Kopie per MOVE16 (Warp, 16.11.2026) ---------------------------
+ *
+ * Gemessen auf Amiga 1 (Warp1260X, 68060 @ 100 MHz, F1 in zod_porting_plan.md):
+ * copy_lang schreibt in den Grafikspeicher mit 30 MB/s, in den kleinen
+ * Stuecken der Schmutzspur (~100 Byte) nur mit ~20 MB/s. WarpBench auf
+ * derselben Karte: MOVE16 Fast->VRAM 55 MB/s.
+ *
+ * MOVE16 liest und schreibt am Datencache vorbei. Die QUELLE (compose, im
+ * Copyback-Cache frisch gezeichnet) muss deshalb VOR der Kopie aus dem Cache
+ * geschoben werden -- das macht zod_copy_vram_push() einmal je Bild, vor der
+ * Sperre. Das ZIEL (VRAM) ist nicht gecacht.
+ *
+ * Nur wenn Quelle und Ziel dieselbe Lage in der 16-Byte-Zeile haben; sonst,
+ * und auf 68020/030, bleibt copy_lang. Der 68080 (AMMX) bleibt unberuehrt. */
+static int vram_m16 = 0;
+unsigned long zod_vram_m16_rows = 0, zod_vram_lang_rows = 0;
+
+static void move16_lines(unsigned char *dst, const unsigned char *src, unsigned long n)
+{
+	register const unsigned char *a0 __asm("a0") = src;
+	register unsigned char *a1 __asm("a1") = dst;
+	register unsigned long d0 __asm("d0") = n;
+
+	__asm__ volatile (
+		"1:\n\t"
+		".word 0xf620,0x9000\n\t"   /* move16 (a0)+,(a1)+ */
+		"subq.l #1,%2\n\t"
+		"bne.s 1b"
+		: "+a" (a0), "+a" (a1), "+d" (d0) : : "cc", "memory");
+}
+
+static void rect_vram(unsigned char *d, const unsigned char *s,
+                      int w, int h, int dpitch, int spitch)
+{
+	if(w <= 0 || h <= 0) return;
+
+	if(w == dpitch && w == spitch)
+	{
+		w *= h;
+		h = 1;
+	}
+
+	if(!vram_m16 || w < 16 || (((unsigned long)d ^ (unsigned long)s) & 15) ||
+	   (h > 1 && (((unsigned long)dpitch | (unsigned long)spitch) & 15)))
+	{
+		zod_vram_lang_rows += (unsigned long)h;
+
+		for(int y = 0; y < h; y++, d += dpitch, s += spitch)
+			copy_lang(d, s, w);
+
+		return;
+	}
+
+	/* alle Zeilen haben dieselbe Aufteilung (Abstaende sind Vielfache von 16) */
+	const int kopf = (int)((16 - ((unsigned long)s & 15)) & 15);
+	const unsigned long zeilen16 = (unsigned long)(w - kopf) >> 4;
+	const int rest = w - kopf - (int)(zeilen16 << 4);
+
+	zod_vram_m16_rows += (unsigned long)h;
+
+	for(int y = 0; y < h; y++, d += dpitch, s += spitch)
+	{
+		if(kopf) copy_lang(d, s, kopf);
+
+		/* n = 0 waere in der subq/bne-Schleife 2^32 Durchlaeufe */
+		if(zeilen16) move16_lines(d + kopf, s + kopf, zeilen16);
+
+		if(rest) copy_lang(d + kopf + (zeilen16 << 4), s + kopf + (zeilen16 << 4), rest);
+	}
+}
+
+static void rect_vram_lang(unsigned char *d, const unsigned char *s,
+                           int w, int h, int dpitch, int spitch)
+{
+	zod_vram_lang_rows += (unsigned long)(h > 0 ? h : 0);
+	rect_lang(d, s, w, h, dpitch, spitch);
+}
+
+void (*zod_copy_vram_rect)(unsigned char *, const unsigned char *,
+                           int, int, int, int) = rect_vram_lang;
+
+void zod_copy_vram_push(const void *p, unsigned long bytes)
+{
+	if(!vram_m16 || !bytes) return;
+
+	/* Groesser als der Datencache (8 KB): den GANZEN Cache schieben
+	 * (~0 = alles, CPUSHA) statt Zeile fuer Zeile ueber 300 KB. */
+	if(bytes > 8192) CacheClearE(0, ~0UL, CACRF_ClearD);
+	else             CacheClearE((APTR)p, bytes, CACRF_ClearD);
+}
+
+int zod_copy_vram_m16(void) { return vram_m16; }
+
 void (*zod_copy_row)(unsigned char *, const unsigned char *, int) = copy_lang;
 void (*zod_copy_rect)(unsigned char *, const unsigned char *,
                       int, int, int, int) = rect_lang;
@@ -195,6 +291,7 @@ void zod_copy_init(void)
 	{
 		zod_copy_row  = copy_ammx;
 		zod_copy_rect = rect_ammx;
+		zod_copy_vram_rect = rect_ammx;
 		ZLOG("Kopierweg: AMMX (8 Byte je Befehl)\n");
 
 		return;
@@ -206,6 +303,17 @@ void zod_copy_init(void)
 	zod_copy_row  = copy_lang;
 	zod_copy_rect = rect_lang;
 	ZLOG("Kopierweg: Langwoerter\n");
+
+	/* Bildausgabe in den Grafikspeicher: MOVE16 auf 040/060.
+	 * SetEnv ZOD_VRAMCOPY lang schaltet fuer den A/B-Vergleich zurueck. */
+	if(GetVar((CONST_STRPTR)"ZOD_VRAMCOPY", (STRPTR)wahl, sizeof(wahl), 0) <= 0)
+		wahl[0] = 0;
+
+	vram_m16 = (SysBase->AttnFlags & (AFF_68040 | AFF_68060)) != 0
+	           && wahl[0] != 'l' && wahl[0] != 'L';
+	zod_copy_vram_rect = vram_m16 ? rect_vram : rect_vram_lang;
+	ZLOG("Bildausgabe: %s\n", vram_m16 ? "MOVE16 (Vorgabe auf 040/060)"
+	                                   : "Langwoerter (ZOD_VRAMCOPY lang oder alte CPU)");
 }
 
 #endif

@@ -999,11 +999,15 @@ int main(int argc, char **argv)
      * kann das Feld den Namen des eingestellten Modus nicht zeigen. */
     ahi_oeffnen();
 
-    MUIMasterBase = OpenLibrary(MUIMASTER_NAME, MUIMASTER_VMIN);
+    /* MUI 3.8 (muimaster 19) genuegt, wie im README zugesagt. MUIMASTER_VMIN
+     * aus dem SDK der Werkzeugkette ist 20 (MUI 3.9+) -- damit startete der
+     * Launcher auf einem A1200 mit MUI 3.8 gar nicht (Warp, 17.11.2026). */
+#define ZOD_MUI_VMIN 19
+    MUIMasterBase = OpenLibrary(MUIMASTER_NAME, ZOD_MUI_VMIN);
     if(!MUIMasterBase)
     {
-        Printf("ZodLaunch: muimaster.library %ld or newer is required.\n",
-               (LONG)MUIMASTER_VMIN);
+        Printf("ZodLaunch: muimaster.library %ld (MUI 3.8) or newer is required.\n",
+               (LONG)ZOD_MUI_VMIN);
         return RETURN_FAIL;
     }
 

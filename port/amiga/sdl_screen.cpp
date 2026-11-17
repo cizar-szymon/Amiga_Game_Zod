@@ -58,6 +58,14 @@ extern "C" void zod_dirty_mark(void *dst, int x, int y, int w, int h);
 extern "C" void zod_dirty_restore_begin(void);
 extern "C" void zod_dirty_restore_end(void);
 extern "C" int  zod_dirty_out_zeile(int blockzeile);
+/* Scrollen mit dem Blitter (sdl_video.cpp) */
+extern "C" int  zod_dirty_scroll_get(int *dx, int *dy, int *rx, int *ry, int *rw, int *rh);
+extern "C" void zod_dirty_scroll_done(void);
+extern "C" void zod_dirty_out_mark(int x, int y, int w, int h);
+extern unsigned long zod_scroll_blits, zod_scroll_abgelehnt, zod_scroll_grund[6];
+extern unsigned long zod_scroll_genau, zod_scroll_block, zod_scroll_rechtecke;
+extern unsigned long zod_scroll_bl_innen, zod_scroll_bl_aussen;
+extern "C" void zod_dirty_scroll_zaehlen(int rx, int ry, int rw, int rh);
 
 static int breit_an = 0;
 
@@ -75,6 +83,50 @@ static unsigned long flip_sperre = 0;
 static unsigned long flip_kopie  = 0;
 static unsigned long flip_rest   = 0;
 static unsigned long flip_bilder = 0;
+
+/* ZOD_VERIFY: Rueckleseprobe des Grafikspeichers (siehe SDL_Flip) */
+static int verify_an = 0;
+static unsigned long verify_bilder = 0, verify_schlecht = 0, verify_punkte = 0;
+/* die ersten falschen Bilder genauer: Rahmen der Abweichung, Scrollschritt */
+static int verify_scroll_dx = 0, verify_scroll_dy = 0;
+enum { VERIFY_MERK = 4 };
+static int verify_merk_n = 0;
+static short verify_merk[VERIFY_MERK][6];   /* x0 y0 x1 y1 dx dy */
+static unsigned long verify_merk_bild[VERIFY_MERK], verify_merk_punkte[VERIFY_MERK];
+static unsigned char *verify_vram_kopie = 0, *verify_comp_kopie = 0;
+static int verify_kopie_w = 0, verify_kopie_h = 0;
+static unsigned char verify_pal[768];
+
+/* Erstes falsches Bild als RAM:zod-verify-vram.ppm / -comp.ppm */
+static void verify_ppm(const char *name, const unsigned char *pix)
+{
+	BPTR f = Open((CONST_STRPTR)name, MODE_NEWFILE);
+
+	if(!f) return;
+
+	char kopf[32];
+	int n = snprintf(kopf, sizeof(kopf), "P6\n%d %d\n255\n", verify_kopie_w, verify_kopie_h);
+
+	Write(f, kopf, n);
+
+	static unsigned char zeile[3 * 1280];
+
+	for(int y = 0; y < verify_kopie_h; y++)
+	{
+		const unsigned char *q = pix + (unsigned long)y * verify_kopie_w;
+
+		for(int x = 0; x < verify_kopie_w; x++)
+		{
+			zeile[x * 3 + 0] = verify_pal[q[x] * 3 + 0];
+			zeile[x * 3 + 1] = verify_pal[q[x] * 3 + 1];
+			zeile[x * 3 + 2] = verify_pal[q[x] * 3 + 2];
+		}
+
+		Write(f, zeile, verify_kopie_w * 3);
+	}
+
+	Close(f);
+}
 
 /* ---- Bildschirmfoto AUS DEM GRAFIKSPEICHER ------------------------------
  *
@@ -350,6 +402,44 @@ void zod_flip_report(void)
 	     (long)((flip_sperre / flip_bilder) * 1000UL / t),
 	     (long)((flip_kopie  / flip_bilder) * 1000UL / t),
 	     (long)((flip_rest   / flip_bilder) * 1000UL / t));
+	ZLOG("Bildausgabe: %lu Zeilen MOVE16, %lu Zeilen Langwoerter (je Bild %lu / %lu)\n",
+	     zod_vram_m16_rows, zod_vram_lang_rows,
+	     zod_vram_m16_rows / flip_bilder, zod_vram_lang_rows / flip_bilder);
+
+	ZLOG("Scrollen: %lu mal per Blitter, %lu mal ganzes Bild (abgelehnt:"
+	     " aus %lu, Vorspur %lu, offen %lu, Sprung %lu, Lage %lu)\n",
+	     zod_scroll_blits, zod_scroll_abgelehnt,
+	     zod_scroll_grund[1], zod_scroll_grund[2], zod_scroll_grund[3],
+	     zod_scroll_grund[4], zod_scroll_grund[5]);
+	ZLOG("Scrollen: %lu mal genaue Rechtecke, %lu mal Bloecke (Liste voll)\n",
+	     zod_scroll_genau, zod_scroll_block);
+
+	if(zod_scroll_blits)
+		ZLOG("Scrollen je Bild: %lu Vor-Rechtecke, Ausgabebloecke %lu in der Karte,"
+		     " %lu ausserhalb\n", zod_scroll_rechtecke / zod_scroll_blits,
+		     zod_scroll_bl_innen / zod_scroll_blits,
+		     zod_scroll_bl_aussen / zod_scroll_blits);
+
+	if(verify_an)
+	{
+		ZLOG("Pruefung Grafikspeicher: %lu Bilder verglichen, %lu mit Abweichung,"
+		     " %lu Punkte falsch\n", verify_bilder, verify_schlecht, verify_punkte);
+
+		if(verify_kopie_w > 0 && verify_kopie_w <= 1280)
+		{
+			verify_ppm("RAM:zod-verify-vram.ppm", verify_vram_kopie);
+			verify_ppm("RAM:zod-verify-comp.ppm", verify_comp_kopie);
+			ZLOG("  erstes falsches Bild: RAM:zod-verify-vram.ppm / -comp.ppm\n");
+		}
+
+		for(int i = 0; i < verify_merk_n; i++)
+			ZLOG("  Abweichung Bild %lu: %lu Punkte in %ld,%ld..%ld,%ld"
+			     " (Scrollschritt %ld,%ld)\n",
+			     verify_merk_bild[i], verify_merk_punkte[i],
+			     (long)verify_merk[i][0], (long)verify_merk[i][1],
+			     (long)verify_merk[i][2], (long)verify_merk[i][3],
+			     (long)verify_merk[i][4], (long)verify_merk[i][5]);
+	}
 }
 
 SDL_Surface *SDL_SetVideoMode(int w, int h, int bpp, Uint32 flags)
@@ -521,6 +611,15 @@ SDL_Surface *SDL_SetVideoMode(int w, int h, int bpp, Uint32 flags)
 		ZLOG("Zeiger: %s\n",
 		     zeiger_weg ? "spaet in den Schirm (an der Lage von jetzt)"
 		                : "in die Zeichenflaeche (ZOD_ZEIGER bild)");
+
+		if(GetVar((CONST_STRPTR)"ZOD_VERIFY", (STRPTR)wahl, sizeof(wahl), 0) > 0
+		   && (wahl[0] == '1' || wahl[0] == 'e' || wahl[0] == 'E' || wahl[0] == 'j'))
+		{
+			verify_an = 1;
+			verify_vram_kopie = (unsigned char *)AllocVec((ULONG)w * h, MEMF_ANY);
+			verify_comp_kopie = (unsigned char *)AllocVec((ULONG)w * h, MEMF_ANY);
+			ZLOG("Pruefung: jedes 25. Bild aus dem Grafikspeicher zurueckgelesen (ZOD_VERIFY)\n");
+		}
 
 		if(GetVar((CONST_STRPTR)"ZOD_BREIT", (STRPTR)wahl, sizeof(wahl), 0) > 0)
 			if(wahl[0] == 'e' || wahl[0] == 'E' || wahl[0] == '1')
@@ -907,6 +1006,15 @@ static void zeiger_einsetzen(SDL_Surface *flaeche)
 		               zeig_vor_w, zeig_vor_h);
 		zod_dirty_restore_end();
 
+		/* Scrollt der Blitter diesmal den Kartenausschnitt, hat er den
+		 * alten Zeiger im Grafikspeicher mitgeschoben -- auch dort
+		 * nachkopieren (sdl_video.cpp, zod_dirty_scroll). */
+		int sdx, sdy, srx, sry, srw, srh;
+
+		if(zod_dirty_scroll_get(&sdx, &sdy, &srx, &sry, &srw, &srh))
+			zod_dirty_out_mark(zeig_vor_x - sdx, zeig_vor_y - sdy,
+			                   zeig_vor_w, zeig_vor_h);
+
 		zeig_vor_w = 0;
 	}
 
@@ -1025,6 +1133,48 @@ int SDL_Flip(SDL_Surface *screen)
 	if(zod_zeiger_spaet()) zeiger_einsetzen(screen);
 
 	const unsigned long t_vor = zod_fineclock_ticks();
+
+	/* MOVE16 liest am Cache vorbei: die frisch gezeichnete Flaeche erst in
+	 * den Speicher schieben -- vor der Sperre (Systemaufruf). Zaehlt in
+	 * "sperren". */
+	if(screen_bpp == 8 && screen->format->BytesPerPixel == 1)
+		zod_copy_vram_push(screen->pixels,
+		                   (unsigned long)screen->pitch * (unsigned long)screen->h);
+
+	/* Scrollen: den Kartenausschnitt IM Grafikspeicher verschieben (Blitter
+	 * der Warp, 8 Bit). Vor der Sperre -- BltBitMap ist ein Systemaufruf.
+	 * Kopiert werden danach nur Streifen und Objekte (zod_dirty_scroll). */
+	{
+		int sdx, sdy, srx, sry, srw, srh;
+
+		verify_scroll_dx = verify_scroll_dy = 0;
+
+		if(zod_dirty_scroll_get(&sdx, &sdy, &srx, &sry, &srw, &srh))
+		{
+			if(screen_bpp == 8)
+			{
+				const int qx = srx + (sdx > 0 ? sdx : 0);
+				const int qy = sry + (sdy > 0 ? sdy : 0);
+				const int zx = srx + (sdx < 0 ? -sdx : 0);
+				const int zy = sry + (sdy < 0 ? -sdy : 0);
+				const int bw = srw - (sdx < 0 ? -sdx : sdx);
+				const int bh = srh - (sdy < 0 ? -sdy : sdy);
+
+				if(bw > 0 && bh > 0)
+				{
+					struct BitMap *bm = screen_ptr->RastPort.BitMap;
+
+					BltBitMap(bm, qx, qy, bm, zx, zy, bw, bh, 0xC0, 0xFF, 0);
+					WaitBlit();
+				}
+			}
+
+			zod_dirty_scroll_zaehlen(srx, sry, srw, srh);
+			verify_scroll_dx = sdx; verify_scroll_dy = sdy;
+
+			zod_dirty_scroll_done();
+		}
+	}
 
 	APTR lock = LockBitMapTagList(screen_ptr->RastPort.BitMap, lbmi);
 
@@ -1168,27 +1318,80 @@ int SDL_Flip(SDL_Surface *screen)
 					const unsigned char *s = src + (unsigned long)y0
 					                       * (unsigned long)screen->pitch + x0;
 
-					if(gleicher_abstand && n == w)
+					/* Ein Aufruf je Lauf (alle Zeilen der Blockzeile) --
+					 * Warp: MOVE16 statt Langwoerter, siehe fastcopy.cpp. */
+					zod_copy_vram_rect(d, s, n, zeilen, (int)bpr, screen->pitch);
+					gezaehlt += (unsigned long)n * (unsigned long)zeilen;
+					zod_dirty_calls++;
+				}
+			}
+		}
+
+		/* ZOD_VERIFY ein: jedes 25. Bild den GANZEN Schirm aus dem
+		 * Grafikspeicher zuruecklesen und mit der Zeichenflaeche
+		 * vergleichen (Warp, MOVE16-Ausgabe). Nur zum Pruefen -- Lesen aus
+		 * dem VRAM ist langsam. */
+		if(verify_an && (flip_bilder % 25) == 0)
+		{
+			unsigned long fehl = 0;
+			int fx0 = 32767, fy0 = 32767, fx1 = -1, fy1 = -1;
+
+			for(int y = 0; y < h; y++)
+			{
+				const unsigned char *vz = dst + (unsigned long)y * bpr;
+				const unsigned char *qz = src + (unsigned long)y * (unsigned long)screen->pitch;
+
+				for(int x = 0; x < w; x++)
+					if(vz[x] != qz[x])
 					{
-						const unsigned long m = (unsigned long)zeilen
-						                      * (unsigned long)bpr;
+						fehl++;
+						if(x < fx0) fx0 = x;
+						if(x > fx1) fx1 = x;
+						if(y < fy0) fy0 = y;
+						if(y > fy1) fy1 = y;
+					}
+			}
 
-						zod_copy_row(d, s, (int)m);
-						gezaehlt += m;
-						zod_dirty_calls++;
+			verify_bilder++;
+			if(fehl)
+			{
+				verify_schlecht++;
+				verify_punkte += fehl;
 
-						continue;
+				/* erstes falsches Bild ganz sichern (Puffer liegen bereit,
+				 * unter der Sperre nur kopieren) -- geschrieben wird im
+				 * Bericht */
+				if(verify_merk_n == 0 && verify_vram_kopie && verify_comp_kopie)
+				{
+					for(int y = 0; y < h; y++)
+					{
+						memcpy(verify_vram_kopie + (unsigned long)y * w,
+						       dst + (unsigned long)y * bpr, (size_t)w);
+						memcpy(verify_comp_kopie + (unsigned long)y * w,
+						       src + (unsigned long)y * (unsigned long)screen->pitch, (size_t)w);
 					}
 
-					for(int r = 0; r < zeilen; r++)
-					{
-						zod_copy_row(d, s, n);
-						gezaehlt += (unsigned long)n;
-						zod_dirty_calls++;
+					verify_kopie_w = w; verify_kopie_h = h;
 
-						d += bpr;
-						s += screen->pitch;
-					}
+					if(screen->format->palette && screen->format->palette->colors)
+						for(int i = 0; i < 256; i++)
+						{
+							verify_pal[i * 3 + 0] = screen->format->palette->colors[i].r;
+							verify_pal[i * 3 + 1] = screen->format->palette->colors[i].g;
+							verify_pal[i * 3 + 2] = screen->format->palette->colors[i].b;
+						}
+				}
+
+				if(verify_merk_n < VERIFY_MERK)
+				{
+					short *m = verify_merk[verify_merk_n];
+
+					m[0] = (short)fx0; m[1] = (short)fy0;
+					m[2] = (short)fx1; m[3] = (short)fy1;
+					m[4] = (short)verify_scroll_dx; m[5] = (short)verify_scroll_dy;
+					verify_merk_bild[verify_merk_n] = flip_bilder;
+					verify_merk_punkte[verify_merk_n] = fehl;
+					verify_merk_n++;
 				}
 			}
 		}

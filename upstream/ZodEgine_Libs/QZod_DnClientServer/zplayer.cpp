@@ -3431,6 +3431,66 @@ void ZPlayer::ProcessScroll()
 	//dont scroll if it isn't all loaded
 	if(!graphics_loaded) return;
 
+	/* Messlauf Warp (SetEnv ZOD_BENCHSCROLL ein): wie dauernd gehaltene
+	 * Pfeiltasten rechts+unten, gleiche Geschwindigkeit wie die Tasten; an
+	 * der Kartengrenze kehrt die Richtung um. Nur zum Messen des Scrollens
+	 * -- ohne den Schalter unveraendert. */
+	{
+		static int bs_an = -1;
+		static int bs_dx = 1, bs_dy = 1;
+
+		if(bs_an < 0)
+		{
+			char buf[16];
+			const char *e = zod_env("ZOD_BENCHSCROLL", buf, sizeof(buf));
+
+			bs_an = (e && (*e == '1' || *e == 'e' || *e == 'E' || *e == 'j')) ? 1 : 0;
+
+			if(bs_an) ZLOG("Messlauf: Dauerscrollen (ZOD_BENCHSCROLL)\n");
+
+			/* Die Zeitmarken sind ohne Tastendruck nie gesetzt worden
+			 * (Muell im Speicher) -- sonst springt der Ausschnitt in jedem
+			 * Bild ueber die ganze Karte. */
+			last_horz_scroll_time = last_vert_scroll_time = the_time;
+			horz_scroll_over = vert_scroll_over = 0;
+		}
+
+		if(bs_an)
+		{
+			the_shift = (the_time - last_horz_scroll_time) * shift_speed + horz_scroll_over;
+
+			if(the_shift > 64) the_shift = 64;
+
+			if(the_shift >= 1)
+			{
+				last_horz_scroll_time = the_time;
+				horz_scroll_over = the_shift - (int)the_shift;
+
+				const bool ganz = bs_dx > 0 ? zmap.ShiftViewRight((int)the_shift)
+				                            : zmap.ShiftViewLeft((int)the_shift);
+
+				if(!ganz) bs_dx = -bs_dx;
+			}
+
+			the_shift = (the_time - last_vert_scroll_time) * shift_speed + vert_scroll_over;
+
+			if(the_shift > 64) the_shift = 64;
+
+			if(the_shift >= 1)
+			{
+				last_vert_scroll_time = the_time;
+				vert_scroll_over = the_shift - (int)the_shift;
+
+				const bool ganz = bs_dy > 0 ? zmap.ShiftViewDown((int)the_shift)
+				                            : zmap.ShiftViewUp((int)the_shift);
+
+				if(!ganz) bs_dy = -bs_dy;
+			}
+
+			return;
+		}
+	}
+
 	if(DoKeyScrollUp() || DoMouseScrollUp())//up_down && !down_down)
 	{
 		time_diff = the_time - last_vert_scroll_time;

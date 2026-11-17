@@ -644,6 +644,10 @@ void run_single_player()
         zplayer.Tick();
         frames++;
 
+        //Messlauf: nach 100 Bildern ohne Mausklick freigeben (Warp-Messungen
+        //ueber AmiAgent, das nur Tasten senden kann)
+        if(measure && frames == 100) zserver.BenchResume();
+
         //AmigaOS: Strg-C beendet sauber (auf anderen Systemen wirkungslos)
         if(zod_amiga_break())
         {

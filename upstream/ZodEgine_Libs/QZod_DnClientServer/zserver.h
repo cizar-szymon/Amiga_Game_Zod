@@ -70,6 +70,10 @@ class QZOD_DNCLIENTSERVERSHARED_EXPORT ZServer : public ZCore
 		 * genau das, was auch im Auswahlmenue steht. */
 		const string &GetMapFile() { return map_name; }
 
+		/* Messlauf (-B): das Spiel ohne Mausklick freigeben, damit ein
+		 * ferngesteuerter Lauf ueberhaupt etwas zu messen hat. */
+		void BenchResume() { ResumeGame(); }
+
 	private:
 		void ProcessEndGame();
 		void CheckEndGame();

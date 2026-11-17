@@ -43,6 +43,15 @@ extern void (*zod_copy_rect)(unsigned char *dst, const unsigned char *src,
 
 extern unsigned long zod_rect_calls, zod_rect_rows, zod_rect_fast;
 
+/* Bildausgabe Fast-RAM -> Grafikspeicher (MOVE16 auf 040/060, Warp).
+ * Vor der ersten Kopie eines Bildes die Quelle mit zod_copy_vram_push()
+ * aus dem Datencache schieben -- AUSSERHALB der Bitmap-Sperre. */
+extern void (*zod_copy_vram_rect)(unsigned char *dst, const unsigned char *src,
+                                  int w, int h, int dpitch, int spitch);
+void zod_copy_vram_push(const void *p, unsigned long bytes);
+int  zod_copy_vram_m16(void);
+extern unsigned long zod_vram_m16_rows, zod_vram_lang_rows;
+
 #else
 
 /* Auf dem Host ist memcpy echter, optimierter Code. */

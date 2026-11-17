@@ -262,6 +262,8 @@ extern "C" void zod_surface_big_hint(int on)
 
 extern "C" int zod_dirty_get_luecke(void) { return luecke; }
 
+static void rechteck_ungueltig(void);   /* weiter unten, Scrollen */
+
 extern "C" void zod_dirty_set_target(SDL_Surface *s)
 {
 	char wahl[16];
@@ -319,6 +321,7 @@ extern "C" void zod_dirty_set_target(SDL_Surface *s)
 	grid_alles(obj_grid, 1);
 	grid_alles(prev_grid, 1);
 	prev_gueltig = 0;
+	rechteck_ungueltig();
 }
 
 extern "C" void zod_dirty_restore_begin(void) { im_restore = 1; }
@@ -326,11 +329,262 @@ extern "C" void zod_dirty_restore_end(void)   { im_restore = 0; }
 
 extern "C" void zod_dirty_mark(void *dstv, int x, int y, int w, int h);
 
+/* ---- Scrollen mit dem Blitter der Karte (Warp, 17.11.2026) --------------
+ *
+ * Bisher: jede Verschiebung des Ausschnitts = zod_dirty_force_full, das
+ * ganze Bild geht in den Grafikspeicher (640x480: 6,7 ms mit MOVE16).
+ *
+ * Jetzt: der Kartenausschnitt R wird IM GRAFIKSPEICHER verschoben
+ * (BltBitMap, Blitter der Warp, SDL_Flip), und kopiert werden nur Bloecke,
+ * in denen der verschobene Speicherinhalt von der Zeichenflaeche abweichen
+ * kann:
+ *   1. die freigelegten Streifen am Rand von R,
+ *   2. die Objektbloecke des LETZTEN Bildes (prev_grid), um die Verschiebung
+ *      versetzt -- der Blitter hat die alten Einheiten mitgeschoben,
+ *   3. alles, was in diesem Bild gezeichnet wird (wie immer),
+ *   4. der alte Mauszeiger, versetzt (sdl_screen.cpp, zeiger_einsetzen).
+ * Der volle Hintergrundblit dieses Bildes wird NICHT vermerkt
+ * (zod_dirty_scrollblit_*): er erneuert nur, was der Blitter schon richtig
+ * hingeschoben hat.
+ *
+ * Grundsatz: die Zeichenflaeche ist immer richtig. Ein Block zu viel kostet
+ * nur Zeit, ein Block zu wenig waere ein Fehler -- deshalb wird grosszuegig
+ * auf ganze Bloecke gerundet. Pruefung: ZOD_VERIFY (sdl_screen.cpp).
+ * Abschalten: SetEnv ZOD_BLITSCROLL aus. */
+static int scroll_erlaubt = -1;
+static int scroll_pend = 0;
+static int scroll_dx, scroll_dy, scroll_rx, scroll_ry, scroll_rw, scroll_rh;
+static int im_scrollblit = 0;
+unsigned long zod_scroll_blits = 0, zod_scroll_abgelehnt = 0;
+/* Gruende: 1 aus, 2 Vorspur ungueltig, 3 noch eine offen, 4 Sprung zu gross, 5 Lage */
+unsigned long zod_scroll_grund[6];
+
+/* GENAUE Objektrechtecke je Bild (nicht nur Bloecke). Beim Scrollen wird ein
+ * Block um eine Verschiebung, die kein Vielfaches von 16 ist, auf 2x2
+ * Bloecke verschmiert -- jedes unbewegte Kartenobjekt kostete damit das
+ * Vierfache. Ein genaues Rechteck faellt dagegen fuer ein unbewegtes Objekt
+ * exakt auf sein neues Rechteck, das ohnehin vermerkt wird.
+ * Laeuft die Liste ueber, gilt fuer dieses Bild der Blockweg. */
+enum { ZOD_RECHTECKE = 4096 };
+struct zod_rechteck { short x, y, w, h; };
+static zod_rechteck rechteck_a[ZOD_RECHTECKE], rechteck_b[ZOD_RECHTECKE];
+static zod_rechteck *rechteck_jetzt = rechteck_a, *rechteck_vor = rechteck_b;
+static int rechteck_jetzt_n = 0, rechteck_vor_n = 0;
+static int rechteck_jetzt_voll = 0, rechteck_vor_voll = 1;
+unsigned long zod_scroll_genau = 0, zod_scroll_block = 0, zod_scroll_rechtecke = 0;
+unsigned long zod_scroll_bl_innen = 0, zod_scroll_bl_aussen = 0;
+
+/* Diagnose fuer SDL_Flip: Bloecke der Ausgabespur innerhalb/ausserhalb von R
+ * in einem Scrollbild zaehlen */
+extern "C" void zod_dirty_scroll_zaehlen(int rx, int ry, int rw, int rh)
+{
+	for(int by = 0; by < grid_h; by++)
+		for(int bx = 0; bx < grid_w; bx++)
+		{
+			if(!out_grid[by][bx]) continue;
+
+			const int x = bx << ZOD_BLOCK_SHIFT, y = by << ZOD_BLOCK_SHIFT;
+
+			if(x >= rx && y >= ry && x < rx + rw && y < ry + rh) zod_scroll_bl_innen++;
+			else zod_scroll_bl_aussen++;
+		}
+}
+
+static inline void rechteck_merken(int x, int y, int w, int h)
+{
+	if(rechteck_jetzt_voll) return;
+
+	if(rechteck_jetzt_n >= ZOD_RECHTECKE) { rechteck_jetzt_voll = 1; return; }
+
+	zod_rechteck &r = rechteck_jetzt[rechteck_jetzt_n++];
+
+	r.x = (short)x; r.y = (short)y; r.w = (short)w; r.h = (short)h;
+}
+
+static void rechteck_ungueltig(void)
+{
+	rechteck_jetzt_voll = 1;
+	rechteck_vor_voll = 1;
+}
+
+/* in zod_dirty_clear: Liste dieses Bildes wird die Vorliste */
+static void rechteck_tauschen(void)
+{
+	zod_rechteck *t = rechteck_vor;
+
+	rechteck_vor = rechteck_jetzt;
+	rechteck_jetzt = t;
+	rechteck_vor_n = rechteck_jetzt_n;
+	rechteck_vor_voll = rechteck_jetzt_voll;
+	rechteck_jetzt_n = 0;
+	rechteck_jetzt_voll = 0;
+}
+
+static void out_mark(int x, int y, int w, int h)
+{
+	if(w <= 0 || h <= 0 || !grid_w) return;
+
+	if(x < 0) { w += x; x = 0; }
+	if(y < 0) { h += y; y = 0; }
+	if(w <= 0 || h <= 0) return;
+
+	int bx0 = x >> ZOD_BLOCK_SHIFT;
+	int by0 = y >> ZOD_BLOCK_SHIFT;
+	int bx1 = (x + w - 1) >> ZOD_BLOCK_SHIFT;
+	int by1 = (y + h - 1) >> ZOD_BLOCK_SHIFT;
+
+	if(bx1 >= grid_w) bx1 = grid_w - 1;
+	if(by1 >= grid_h) by1 = grid_h - 1;
+
+	for(int by = by0; by <= by1; by++)
+		for(int bx = bx0; bx <= bx1; bx++)
+			out_grid[by][bx] = 1;
+}
+
+/* Aus ZMap::DoRender, wenn sich NUR der Ausschnitt verschoben hat.
+ * dx/dy: Verschiebung der Karte in Punkten (shift neu - shift alt), R in
+ * Schirmkoordinaten. Rueckgabe 1 = uebernommen, 0 = voller Weg wie bisher. */
+extern "C" int zod_dirty_scroll(int dx, int dy, int rx, int ry, int rw, int rh)
+{
+	if(scroll_erlaubt < 0)
+	{
+		char wahl[16];
+
+		scroll_erlaubt = 1;
+
+		if(zod_env("ZOD_BLITSCROLL", wahl, sizeof(wahl)))
+			if(wahl[0] == 'a' || wahl[0] == 'A' || wahl[0] == '0')
+				scroll_erlaubt = 0;
+
+		ZLOG("Scrollen: %s\n", scroll_erlaubt
+		     ? "Blitter im Grafikspeicher + Streifen (Vorgabe)"
+		     : "ganzes Bild (ZOD_BLITSCROLL aus)");
+	}
+
+	{
+		int grund = 0;
+
+		if(!scroll_erlaubt || !dirty_an || !grid_w) grund = 1;
+		else if(!prev_gueltig) grund = 2;
+		else if(scroll_pend) grund = 3;
+		else if(rw <= 0 || rh <= 0 || dx >= rw || -dx >= rw || dy >= rh || -dy >= rh) grund = 4;
+		else if(rx < 0 || ry < 0 || rx + rw > dirty_target->w || ry + rh > dirty_target->h) grund = 5;
+
+		if(grund)
+		{
+			zod_scroll_abgelehnt++;
+			zod_scroll_grund[grund]++;
+
+			if(zod_scroll_abgelehnt <= 6)
+				ZLOG("Scrollen abgelehnt (%ld): d=%ld,%ld R=%ld,%ld %ldx%ld\n",
+				     (long)grund, (long)dx, (long)dy, (long)rx, (long)ry,
+				     (long)rw, (long)rh);
+			return 0;
+		}
+	}
+
+	/* 2. Objekte des letzten Bildes, soweit in R, um -d versetzt.
+	 *    Genau ueber die Rechteckliste; ist sie uebergelaufen, ueber Bloecke. */
+	const int block = 1 << ZOD_BLOCK_SHIFT;
+
+	if(!rechteck_vor_voll)
+	{
+		zod_scroll_genau++;
+
+		for(int i = 0; i < rechteck_vor_n; i++)
+		{
+			const zod_rechteck &r = rechteck_vor[i];
+
+			/* 2 Punkte Rand: manches zeichnet knapp neben sein gemeldetes
+			 * Rechteck (gemessen: 18 Punkte in 2 von 34 Bildern ohne Rand) */
+			int x0 = r.x - 2, y0 = r.y - 2, x1 = r.x + r.w + 2, y1 = r.y + r.h + 2;
+
+			if(x0 < rx) x0 = rx;
+			if(y0 < ry) y0 = ry;
+			if(x1 > rx + rw) x1 = rx + rw;
+			if(y1 > ry + rh) y1 = ry + rh;
+
+			if(x1 <= x0 || y1 <= y0) continue;
+
+			out_mark(x0 - dx, y0 - dy, x1 - x0, y1 - y0);
+		}
+	}
+	else
+	{
+	zod_scroll_block++;
+
+	for(int by = 0; by < grid_h; by++)
+		for(int bx = 0; bx < grid_w; bx++)
+		{
+			if(!prev_grid[by][bx]) continue;
+
+			int x0 = bx << ZOD_BLOCK_SHIFT, y0 = by << ZOD_BLOCK_SHIFT;
+			int x1 = x0 + block, y1 = y0 + block;
+
+			if(x0 < rx) x0 = rx;
+			if(y0 < ry) y0 = ry;
+			if(x1 > rx + rw) x1 = rx + rw;
+			if(y1 > ry + rh) y1 = ry + rh;
+
+			if(x1 <= x0 || y1 <= y0) continue;
+
+			out_mark(x0 - dx, y0 - dy, x1 - x0, y1 - y0);
+		}
+	}
+
+	/* 1. freigelegte Streifen */
+	if(dx > 0) out_mark(rx + rw - dx, ry, dx, rh);
+	else if(dx < 0) out_mark(rx, ry, -dx, rh);
+
+	if(dy > 0) out_mark(rx, ry + rh - dy, rw, dy);
+	else if(dy < 0) out_mark(rx, ry, rw, -dy);
+
+	scroll_pend = 1;
+	zod_scroll_rechtecke += (unsigned long)rechteck_vor_n;
+	scroll_dx = dx; scroll_dy = dy;
+	scroll_rx = rx; scroll_ry = ry; scroll_rw = rw; scroll_rh = rh;
+
+	return 1;
+}
+
+/* Fuer SDL_Flip: liegt eine Verschiebung an? */
+extern "C" int zod_dirty_scroll_get(int *dx, int *dy, int *rx, int *ry, int *rw, int *rh)
+{
+	if(!scroll_pend) return 0;
+
+	*dx = scroll_dx; *dy = scroll_dy;
+	*rx = scroll_rx; *ry = scroll_ry; *rw = scroll_rw; *rh = scroll_rh;
+
+	return 1;
+}
+
+extern "C" void zod_dirty_scroll_done(void)
+{
+	if(scroll_pend) zod_scroll_blits++;
+
+	scroll_pend = 0;
+}
+
+/* Fuer den Mauszeiger: ein Rechteck NUR in die Ausgabespur */
+extern "C" void zod_dirty_out_mark(int x, int y, int w, int h)
+{
+	out_mark(x, y, w, h);
+}
+
+extern "C" void zod_dirty_scrollblit_begin(void) { im_scrollblit = 1; }
+extern "C" void zod_dirty_scrollblit_end(void)   { im_scrollblit = 0; }
+
 /* Einen beschriebenen Bereich vermerken. Nur fuer die Zeichenflaeche --
  * Blits in Karten- oder Zwischenflaechen gehen den Schirm nichts an. */
 static inline void dirty_mark(SDL_Surface *dst, int x, int y, int w, int h)
 {
 	if(dst != dirty_target || w <= 0 || h <= 0 || !grid_w) return;
+
+	/* voller Hintergrundblit eines Scrollbildes: der Blitter hat das schon */
+	if(im_scrollblit) return;
+
+	/* genaues Rechteck fuer das naechste Scrollbild (nur Objekte) */
+	if(!im_restore) rechteck_merken(x, y, w, h);
 
 	int bx0 = x < 0 ? 0 : (x >> ZOD_BLOCK_SHIFT);
 	int by0 = y < 0 ? 0 : (y >> ZOD_BLOCK_SHIFT);
@@ -581,6 +835,8 @@ extern "C" void zod_dirty_clear(void)
 	grid_alles(obj_grid, 0);
 	grid_alles(out_grid, 0);
 
+	rechteck_tauschen();
+
 	prev_gueltig = 1;
 }
 
@@ -595,6 +851,12 @@ extern "C" void zod_dirty_force_full(void)
 	prev_gueltig = 0;
 	grid_alles(out_grid, 1);
 	grid_alles(obj_grid, 1);
+
+	/* Die Objektspur gilt jetzt als "alles" -- die genaue Rechteckliste
+	 * dieses Bildes waere zu klein (z. B. neu eingebackene Zonenmarker in
+	 * der Kartenflaeche). Das naechste Scrollbild nimmt deshalb den
+	 * Blockweg, und der vermerkt alles. Gefunden mit ZOD_VERIFY. */
+	rechteck_jetzt_voll = 1;
 }
 
 extern "C" void zod_dirty_report(unsigned long long *bytes, unsigned long *frames)
