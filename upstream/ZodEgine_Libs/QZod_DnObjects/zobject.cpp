@@ -11,7 +11,14 @@ unsigned long zod_pe_suchen = 0;     /* davon ueber die 0,5-s-Sperre hinaus    *
 unsigned long zod_pe_paare = 0;      /* Durchlaeufe ueber passive_engagable    */
 unsigned long zod_pe_ticks = 0;      /* Zeit in Messbildern                    */
 unsigned long zod_pe_gemessen = 0;   /* gemessene Aufrufe (je 2 Uhrablesungen) */
+/* Warp F3: ProcessServer in Abschnitten (nur Messbilder): 0 vorher, 1 MOVE_WP,
+ * 2 AGRO_WP, 3 ATTACK_WP, 4 andere Wegpunkte, 5 CheckPassiveEngage, 6 Schaden */
+unsigned long zod_ps_ticks[8], zod_ps_n[8];
+unsigned long zod_pe_scan_ticks = 0, zod_pe_scan_n = 0, zod_pe_rest_ticks = 0;
 }
+
+#define ZOD_PS(k) do { if(zod_prof_frame) { const unsigned long ps_n = zod_fineclock_ticks(); \
+	zod_ps_ticks[k] += ps_n - ps_t; zod_ps_n[k]++; ps_t = ps_n; } } while(0)
 
 ZSettings ZObject::default_zsettings;
 
@@ -1475,6 +1482,8 @@ int ZObject::ProcessServer(ZMap &tmap, ZOLists &ols)
 
 	sflags.clear();
 
+	unsigned long ps_t = zod_prof_frame ? zod_fineclock_ticks() : 0;
+
 	//it being repaired?
 	sflags.auto_repair = DoAutoRepair(tmap, ols);
 
@@ -1492,10 +1501,15 @@ int ZObject::ProcessServer(ZMap &tmap, ZOLists &ols)
 	//lid business
 	ProcessServerLid();
 
+	ZOD_PS(0);
+
 	//go through waypoints
 	if(waypoint_list.size())
 	{
 		wp = waypoint_list.begin();
+
+		const int ps_wp = wp->mode == MOVE_WP || wp->mode == FORCE_MOVE_WP ? 1
+		                : wp->mode == AGRO_WP ? 2 : wp->mode == ATTACK_WP ? 3 : 4;
 
 		if(*wp != last_wp)
 		{
@@ -1558,6 +1572,8 @@ int ZObject::ProcessServer(ZMap &tmap, ZOLists &ols)
 			KillWP(wp);
 			break;
 		}
+
+		ZOD_PS(ps_wp);
 	}
 	else
 	{
@@ -1578,8 +1594,12 @@ int ZObject::ProcessServer(ZMap &tmap, ZOLists &ols)
 	else
 		CheckPassiveEngage(the_time, ols);
 
+	ZOD_PS(5);
+
 	//let them do their damage
 	ProcessAttackDamage(tmap, attack_player_given);
+
+	ZOD_PS(6);
 
 	//update location only happens in intervals
 	//update velocity always happens
@@ -1638,6 +1658,323 @@ bool ZObject::IsMoving()
 	return !((loc.dx > -z && loc.dx < z) && (loc.dy > -z && loc.dy < z));
 }
 
+/* ---- Warp F3: Raster fuer CheckPassiveEngage (17.11.2026) ---------------
+ *
+ * Gemessen (plan 6t, orig07, 2 x 32 Robotergruppen): CheckPassiveEngage
+ * 20 ms je Bild bei 5292 Paaren -- jede suchende Einheit lief ueber ALLE
+ * Eintraege von passive_engagable_olist (~4 us je Paar, fast nur
+ * Cache-Fehlgriffe auf fremde Objekte).
+ *
+ * Wirkung haben nur Eintraege innerhalb von max(Angriff + Agro,
+ * Einsteigen) um die Mitte der Einheit; alles andere ist in der Schleife
+ * folgenlos. Das Raster (Zellen 128 Punkte) liefert genau die Eintraege der
+ * Zellen in diesem Umkreis, und zwar als LISTENSTELLEN, AUFSTEIGEND sortiert
+ * -- die Schleife sieht sie also in derselben Reihenfolge wie die volle
+ * (erster Treffer gewinnt, gleich weite Agro-Ziele: das fruehere).
+ *
+ * Neu aufgebaut, sobald sich die Bildzeit oder die Liste (ZOLists::version)
+ * aendert. Innerhalb eines Bildes bewegen sich die schon verarbeiteten
+ * Einheiten weiter: Rand 64 Punkte + 400 Punkte/s * Zeit seit dem letzten
+ * Aufbau (Einheiten laufen mit 12-17); ueber 400 Punkte Rand -> volle
+ * Schleife.
+ *
+ * SetEnv ZOD_PEGRID aus = volle Schleife, 2 = Raster + volle Schleife zum
+ * Vergleich (die volle entscheidet, Abweichungen werden gezaehlt). */
+extern "C" {
+unsigned long zod_pe_raster_aufbau = 0, zod_pe_raster_abfragen = 0, zod_pe_raster_kandidaten = 0;
+unsigned long zod_pe_raster_voll = 0, zod_pe_raster_gleich = 0, zod_pe_raster_falsch = 0;
+}
+
+#ifdef __amigaos__
+#include "amiga_startup.h"
+#endif
+#include <algorithm>
+
+namespace
+{
+	enum { PE_ZELLE_SCHUB = 7, PE_MAX_ZELLEN = 64 };
+
+	int pe_modus = -1;
+	vector<int> pe_start;          /* je Zelle Anfang in pe_eintrag (+1 Ende) */
+	vector<int> pe_eintrag;        /* Listenstellen, je Zelle aufsteigend */
+	vector<int> pe_zelle_von;      /* Zelle je Listenstelle */
+	vector<int> pe_treffer;
+	const void *pe_liste = 0;
+	unsigned long pe_version = ~0UL;
+	double pe_zeit = -1.0, pe_zeit_vorher = -1.0;
+	size_t pe_groesse = 0;
+}
+
+static int pe_raster_modus(void)
+{
+	if(pe_modus >= 0) return pe_modus;
+
+	pe_modus = 1;
+
+#ifdef __amigaos__
+	char buf[16];
+	const char *e = zod_env("ZOD_PEGRID", buf, sizeof(buf));
+
+	if(e && (e[0] == 'a' || e[0] == 'A' || e[0] == '0')) pe_modus = 0;
+	else if(e && e[0] == '2') pe_modus = 2;
+#endif
+
+	ZLOG("Angriffssuche: %s\n", pe_modus == 0 ? "volle Schleife (ZOD_PEGRID aus)"
+	     : pe_modus == 2 ? "Raster + Vergleich mit voller Schleife (ZOD_PEGRID 2)"
+	     : "Raster 128 Punkte (Vorgabe)");
+
+	return pe_modus;
+}
+
+static void pe_raster_vergleich(bool gleich)
+{
+	if(gleich) zod_pe_raster_gleich++;
+	else       zod_pe_raster_falsch++;
+}
+
+static void pe_raster_bauen(vector<ZObject*> &liste)
+{
+	const int nz = PE_MAX_ZELLEN * PE_MAX_ZELLEN;
+	const size_t n = liste.size();
+
+	pe_start.assign((size_t)nz + 1, 0);
+	pe_zelle_von.resize(n);
+	pe_eintrag.resize(n);
+
+	for(size_t i = 0; i < n; i++)
+	{
+		int cx, cy;
+
+		liste[i]->GetCenterCords(cx, cy);
+
+		int zx = cx >> PE_ZELLE_SCHUB, zy = cy >> PE_ZELLE_SCHUB;
+
+		if(zx < 0) zx = 0;
+		if(zy < 0) zy = 0;
+		if(zx >= PE_MAX_ZELLEN) zx = PE_MAX_ZELLEN - 1;
+		if(zy >= PE_MAX_ZELLEN) zy = PE_MAX_ZELLEN - 1;
+
+		const int z = zy * PE_MAX_ZELLEN + zx;
+
+		pe_zelle_von[i] = z;
+		pe_start[(size_t)z + 1]++;
+	}
+
+	for(int z = 0; z < nz; z++) pe_start[(size_t)z + 1] += pe_start[(size_t)z];
+
+	/* in Listenreihenfolge einsortieren -> je Zelle aufsteigend */
+	vector<int> pos(pe_start.begin(), pe_start.end() - 1);
+
+	for(size_t i = 0; i < n; i++) pe_eintrag[(size_t)pos[(size_t)pe_zelle_von[i]]++] = (int)i;
+
+	zod_pe_raster_aufbau++;
+}
+
+/* Listenstellen in Reichweite (aufsteigend) nach *idx, Rueckgabe Anzahl;
+ * -1 = volle Schleife nehmen. */
+static int pe_raster_abfrage(vector<ZObject*> &liste, unsigned long version, double the_time,
+                             int x, int y, int reich, const int **idx)
+{
+	if(liste.size() < 16) return -1;      /* lohnt nicht */
+
+	if(&liste != pe_liste || version != pe_version || the_time != pe_zeit || liste.size() != pe_groesse)
+	{
+		pe_zeit_vorher = (&liste == pe_liste) ? pe_zeit : -1.0;
+		pe_liste = &liste;
+		pe_version = version;
+		pe_zeit = the_time;
+		pe_groesse = liste.size();
+		pe_raster_bauen(liste);
+	}
+
+	double dt = (pe_zeit_vorher >= 0.0) ? (the_time - pe_zeit_vorher) : 1.0;
+
+	if(dt < 0.0) dt = 1.0;
+
+	const double rand = 64.0 + 400.0 * dt;
+
+	if(rand > 400.0) { zod_pe_raster_voll++; return -1; }
+
+	const int r = reich + (int)rand;
+	int zx0 = (x - r) >> PE_ZELLE_SCHUB, zx1 = (x + r) >> PE_ZELLE_SCHUB;
+	int zy0 = (y - r) >> PE_ZELLE_SCHUB, zy1 = (y + r) >> PE_ZELLE_SCHUB;
+
+	if(zx0 < 0) zx0 = 0;
+	if(zy0 < 0) zy0 = 0;
+	if(zx1 >= PE_MAX_ZELLEN) zx1 = PE_MAX_ZELLEN - 1;
+	if(zy1 >= PE_MAX_ZELLEN) zy1 = PE_MAX_ZELLEN - 1;
+
+	pe_treffer.clear();
+
+	for(int zy = zy0; zy <= zy1; zy++)
+		for(int zx = zx0; zx <= zx1; zx++)
+		{
+			const int z = zy * PE_MAX_ZELLEN + zx;
+
+			for(int k = pe_start[(size_t)z]; k < pe_start[(size_t)z + 1]; k++)
+				pe_treffer.push_back(pe_eintrag[(size_t)k]);
+		}
+
+	std::sort(pe_treffer.begin(), pe_treffer.end());
+
+	zod_pe_raster_abfragen++;
+	zod_pe_raster_kandidaten += (unsigned long)pe_treffer.size();
+
+	*idx = pe_treffer.empty() ? 0 : &pe_treffer[0];
+
+	return (int)pe_treffer.size();
+}
+
+static vector<ZObject*> &pe_agro_kand(void) { static vector<ZObject*> v; return v; }
+static vector<pair<double, int> > &pe_agro_ord(void) { static vector<pair<double, int> > v; return v; }
+static bool pe_ord_kleiner(const pair<double, int> &a, const pair<double, int> &b) { return a.first < b.first; }
+
+/* Ergebnis so, wie CheckPassiveEngage es benutzt: Angriffsziel, sonst das
+ * naechste Agro-Ziel (frueheres bei Gleichstand), sonst die Einsteigeliste */
+static bool pe_entscheidung_gleich(ZObject *self, ZObject *e1, vector<ZObject*> &a1, vector<ZObject*> &v1,
+                                   ZObject *e2, vector<ZObject*> &a2, vector<ZObject*> &v2)
+{
+	if(e1 != e2) return false;
+	if(e1) return true;
+	if(a1.empty() != a2.empty()) return false;
+
+	if(!a1.empty())
+	{
+		ZObject *w[2] = { 0, 0 };
+		vector<ZObject*> *l[2] = { &a1, &a2 };
+
+		for(int j = 0; j < 2; j++)
+		{
+			double d = 0;
+
+			for(size_t i = 0; i < l[j]->size(); i++)
+			{
+				const double t = self->DistanceFromObject(*(*l[j])[i]);
+
+				if(!w[j] || t < d) { w[j] = (*l[j])[i]; d = t; }
+			}
+		}
+
+		return w[0] == w[1];
+	}
+
+	return v1 == v2;
+}
+
+extern "C" unsigned long zod_barriere_n;
+
+extern "C" void zod_pe_raster_report(void)
+{
+	ZLOG("Sichtlinienpruefungen (EngageBarrierBetweenCoords): %lu\n", zod_barriere_n);
+
+	if(pe_modus <= 0) return;
+
+	ZLOG("Angriffssuche Raster: %lu Aufbauten, %lu Abfragen, %lu Kandidaten je Abfrage, %lu mal volle Schleife\n",
+	     zod_pe_raster_aufbau, zod_pe_raster_abfragen,
+	     zod_pe_raster_abfragen ? zod_pe_raster_kandidaten / zod_pe_raster_abfragen : 0UL,
+	     zod_pe_raster_voll);
+
+	if(pe_modus == 2)
+		ZLOG("Angriffssuche Pruefung: %lu gleich, %lu abweichend -- muss 0 sein\n",
+		     zod_pe_raster_gleich, zod_pe_raster_falsch);
+}
+
+void ZObject::PassiveScan(vector<ZObject*> &liste, const int *idx, int n,
+                          ZObject *&engage, vector<ZObject*> &agro_choices,
+                          vector<ZObject*> &enter_vehicle_choices)
+{
+	engage = nullptr;
+
+	const int gesamt = idx ? n : (int)liste.size();
+	/* Warp F3: Agro-Ziele "faul" -- erst nur der Abstand, die teure
+	 * Sichtlinie (EngageBarrierBetweenCoords, zwei Bresenham-Linien) danach
+	 * nur noch in der Reihenfolge, in der CheckPassiveEngage waehlt (naechstes,
+	 * bei Gleichstand das fruehere), bis eines passt. Ergebnis: agro_choices
+	 * enthaelt genau das Ziel, das die Auswahl aus der vollen Liste ergaebe.
+	 * Nur wenn idx gesetzt ist (Rasterweg); die volle Schleife bleibt das
+	 * Original (Vergleich ZOD_PEGRID 2). */
+	const bool faul = idx != nullptr;
+	vector<ZObject*> &agro_kand = pe_agro_kand();
+
+	if(faul) agro_kand.clear();
+
+	for(int k = 0; k < gesamt; k++)
+	{
+		ZObject *o = liste[(size_t)(idx ? idx[k] : k)];
+		int ox, oy;
+		unsigned char ot, oid;
+
+		zod_pe_paare++;
+
+		o->GetObjectID(ot, oid);
+		o->GetCenterCords(ox, oy);
+
+		if(o->GetOwner() != NULL_TEAM && o->GetOwner() != owner && CanAttackObject(o))
+		{
+			//do not auto attack buildings
+			if(!(ot == CANNON_OBJECT || ot == VEHICLE_OBJECT || ot == ROBOT_OBJECT)) continue;
+
+			if(WithinAttackRadius(o))
+			{
+				engage = o;
+				return;
+			}
+
+			//start an agro waypoint?
+			//if we have no waypoints and are "not a cannon" / "able to move"
+			if(!waypoint_list.size() && object_type != CANNON_OBJECT)
+			{
+				if(faul)
+				{
+					if(WithinAgroRadius(o->center_x, o->center_y)) agro_kand.push_back(o);
+				}
+				else if(WithinAgroRadius(o))
+					agro_choices.push_back(o);
+			}
+		}
+
+		//add to the auto enter or grab lists?
+		if(!waypoint_list.size() && object_type != CANNON_OBJECT)
+		{
+			/* faul: ob vorher schon ein Agro-Ziel stand, ist hier noch
+			 * unbekannt -- gibt es am Ende eines, wird die Liste ohnehin
+			 * nicht benutzt (CheckPassiveEngage nimmt dann das Agro-Ziel) */
+			if(!IsMinion() && (faul || !agro_choices.size()))
+			{
+				//auto enter vehicle (not apc though)?
+				if(object_type == ROBOT_OBJECT && o->CanBeEntered() && WithinAutoEnterRadius(ox, oy) && !(ot == VEHICLE_OBJECT && oid == APC) && !(this->just_left_cannon && ot == CANNON_OBJECT))
+					enter_vehicle_choices.push_back(o);
+			}
+		}
+	}
+
+	if(faul && !agro_kand.empty())
+	{
+		/* Reihenfolge der Auswahl: kleinster Abstand, bei Gleichstand die
+		 * fruehere Listenstelle (stabil sortiert) */
+		vector<pair<double, int> > &ord = pe_agro_ord();
+
+		ord.clear();
+		for(size_t i = 0; i < agro_kand.size(); i++)
+			ord.push_back(pair<double, int>(DistanceFromObject(*agro_kand[i]), (int)i));
+
+		std::stable_sort(ord.begin(), ord.end(), pe_ord_kleiner);
+
+		for(size_t i = 0; i < ord.size(); i++)
+		{
+			ZObject *o = agro_kand[(size_t)ord[i].second];
+
+			if(WithinAgroRadius(o))
+			{
+				agro_choices.push_back(o);
+				break;
+			}
+		}
+
+		if(!agro_choices.empty()) enter_vehicle_choices.clear();
+	}
+}
+
 void ZObject::CheckPassiveEngage(double &the_time, ZOLists &ols)
 {
 	//is it time, since this is a "tiny bit intensive"
@@ -1671,60 +2008,75 @@ void ZObject::CheckPassiveEngage(double &the_time, ZOLists &ols)
 
 	vector<ZObject*>::iterator obj;
 
+	const unsigned long pe_t0 = zod_prof_frame ? zod_fineclock_ticks() : 0;
+	struct pe_rest_uhr
+	{
+		unsigned long t;
+		pe_rest_uhr() : t(0) { }
+		~pe_rest_uhr() { if(t && zod_prof_frame) zod_pe_rest_ticks += zod_fineclock_ticks() - t; }
+	} pe_rest;
+
 	vector<ZObject*> agro_choices;
 	vector<ZObject*> enter_vehicle_choices;
 	vector<ZObject*> grab_flag_choices;
 	vector<ZObject*> grab_grenades_choices;
 
 	//lets see if there are any enemies to attack..
+	/* Warp F3: ueber das Raster nur die Eintraege in Reichweite, in der
+	 * Reihenfolge der Liste -- dieselbe Entscheidung wie die volle Schleife
+	 * (siehe pe_raster_*; ZOD_PEGRID 2 vergleicht beides). */
 	if(CanAttack())
-	for(obj=ols.passive_engagable_olist.begin();obj!=ols.passive_engagable_olist.end();obj++)
 	{
-		int ox, oy;
-		unsigned char ot, oid;
+		vector<ZObject*> &liste = ols.passive_engagable_olist;
+		ZObject *engage = nullptr;
+		const int modus = pe_raster_modus();
+		int n = -1;
+		const int *idx = nullptr;
 
-		zod_pe_paare++;
-
-		(*obj)->GetObjectID(ot, oid);
-		(*obj)->GetCenterCords(ox, oy);
-
-		if((*obj)->GetOwner() != NULL_TEAM && (*obj)->GetOwner() != owner && CanAttackObject((*obj)))
+		if(modus > 0)
 		{
-			//do not auto attack buildings
-			if(!(ot == CANNON_OBJECT || ot == VEHICLE_OBJECT || ot == ROBOT_OBJECT)) continue;
+			int reich = attack_radius + zsettings->agro_distance;
 
-			//if(WithinAttackRadius(ox, oy))
-			if(WithinAttackRadius(*obj))
-			{
-				Engage(*obj);
-				//attack_object = *obj;
-				//sflags.updated_attack_object = true;
-				return;
-			}
+			if(zsettings->auto_grab_vehicle_distance > reich) reich = zsettings->auto_grab_vehicle_distance;
 
-			//start an agro waypoint?
-			//if we have no waypoints and are "not a cannon" / "able to move"
-			if(!waypoint_list.size() && object_type != CANNON_OBJECT)
+			n = pe_raster_abfrage(liste, ols.version, the_time, center_x, center_y, reich, &idx);
+		}
+
+		if(n < 0)
+			PassiveScan(liste, nullptr, 0, engage, agro_choices, enter_vehicle_choices);
+		else
+		{
+			PassiveScan(liste, idx, n, engage, agro_choices, enter_vehicle_choices);
+
+			if(modus == 2)
 			{
-				//if(WithinAgroRadius(ox, oy))
-				if(WithinAgroRadius(*obj))
-					agro_choices.push_back(*obj);
+				/* Pruefung: die volle Schleife entscheidet, das Raster
+				 * muss dasselbe ergeben haben */
+				ZObject *e2 = nullptr;
+				vector<ZObject*> a2, v2;
+
+				PassiveScan(liste, nullptr, 0, e2, a2, v2);
+				pe_raster_vergleich(pe_entscheidung_gleich(this, engage, agro_choices, enter_vehicle_choices, e2, a2, v2));
+
+				engage = e2;
+				agro_choices.swap(a2);
+				enter_vehicle_choices.swap(v2);
 			}
 		}
 
-		//add to the auto enter or grab lists?
-		if(!waypoint_list.size() && object_type != CANNON_OBJECT)
+		if(zod_prof_frame)
 		{
-			if(!IsMinion() && !agro_choices.size())
-			{
-				//auto enter vehicle (not apc though)?
-				if(object_type == ROBOT_OBJECT && (*obj)->CanBeEntered() && WithinAutoEnterRadius(ox, oy) && !(ot == VEHICLE_OBJECT && oid == APC) && !(this->just_left_cannon && ot == CANNON_OBJECT))
-					enter_vehicle_choices.push_back(*obj);
-				//else if((ot == MAP_ITEM_OBJECT && oid == FLAG_ITEM) && (*obj)->GetOwner() != owner && WithinAutoGrabFlagRadius(ox, oy))
-				//	grab_flag_choices.push_back(*obj);
-				//else if((ot == MAP_ITEM_OBJECT && oid == GRENADES_ITEM) && CanPickupGrenades() && WithinAutoEnterRadius(ox, oy))
-				//	grab_grenades_choices.push_back(*obj);
-			}
+			const unsigned long t = zod_fineclock_ticks();
+
+			zod_pe_scan_ticks += t - pe_t0;
+			zod_pe_scan_n++;
+			pe_rest.t = t;
+		}
+
+		if(engage)
+		{
+			Engage(engage);
+			return;
 		}
 	}
 

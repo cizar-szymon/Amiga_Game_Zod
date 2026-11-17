@@ -2,6 +2,7 @@
 #include "fineclock.h"   /* feine Uhr -- current_time() loest hier 20 ms auf */
 #include "amiga_startup.h"   /* zod_env */
 #include <string.h>   /* memcmp: Merkfeld */
+extern "C" unsigned long zod_ps_ticks[8], zod_ps_n[8], zod_pe_scan_ticks, zod_pe_scan_n, zod_pe_rest_ticks;   /* zobject.cpp, Abschnitte */
 
 /* --- Aufteilung des Postens `server` -------------------------------------
  *
@@ -220,6 +221,23 @@ extern "C" void zod_server_sections_report(long frames)
 			     (long)(zod_pe_gemessen / zod_ot_bilder));
 		}
 		(void)pe_uhr;
+
+		{
+			static const char *pn[7] = { "vorher (Reparatur, Ausdauer, Bau, Deckel)",
+				"MOVE_WP", "AGRO_WP", "ATTACK_WP", "andere Wegpunkte",
+				"CheckPassiveEngage", "Angriffsschaden" };
+
+			ZLOG("CheckPassiveEngage: Suchschleife %ld us je Bild (%ld je Bild), danach %ld us je Bild\n",
+			     (long)((zod_pe_scan_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)),
+			     (long)(zod_pe_scan_n / zod_ot_bilder),
+			     (long)((zod_pe_rest_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)));
+			ZLOG("ProcessServer in Abschnitten (alle Objektarten):\n");
+			for(int k = 0; k < 7; k++)
+				if(zod_ps_n[k])
+					ZLOG("  %s: %ld us je Bild, %ld Aufrufe je Bild\n", pn[k],
+					     (long)((zod_ps_ticks[k] / zod_ot_bilder) * 1000UL / (f / 1000UL)),
+					     (long)(zod_ps_n[k] / zod_ot_bilder));
+		}
 
 		ZLOG("  Kartenobjekte uebersprungen: %ld je Bild, Merkfeld %ld mal neu aufgebaut\n",
 		     (long)(zod_ot_leer / (zod_ssec_takte ? zod_ssec_takte : 1)), (long)zod_sk_neu);
@@ -1125,6 +1143,72 @@ void ZServer::InitObjects()
 		else
 			CreateObject(i->object_type, i->object_id, i->x*16, i->y*16, i->owner, nullptr, i->blevel, i->extra_links, i->health_percent);
 	}
+
+#ifdef __amigaos__
+	/* Messlauf Warp (SetEnv ZOD_BENCHARMY <n>): jede Seite bekommt n
+	 * Robotergruppen (Typen reihum), beide Heere stehen sich nahe der
+	 * Kartenmitte auf freiem Boden gegenueber -- eine grosse Schlacht im
+	 * Ausschnitt, ohne auf die Bots zu warten. Ohne Schalter unveraendert. */
+	{
+		char buf[16];
+		const char *e = zod_env("ZOD_BENCHARMY", buf, sizeof(buf));
+		int n = 0;
+
+		for(int k = 0; e && e[k] >= '0' && e[k] <= '9'; k++) n = n * 10 + (e[k] - '0');
+
+		if(n > 0)
+		{
+			const int spalten = 4, zeilen = (n + spalten - 1) / spalten;
+			const int abst = 32, luecke = 48;
+			const int bw = zmap.GetMapBasics().width * 16, bh = zmap.GetMapBasics().height * 16;
+			int gx = -1, gy = -1;
+
+			/* von der Mitte nach aussen eine Stelle suchen, an der jede
+			 * Gruppe Platz hat */
+			for(int r = 0; r < 40 && gx < 0; r++)
+				for(int oy = -r; oy <= r && gx < 0; oy++)
+					for(int ox = -r; ox <= r && gx < 0; ox++)
+					{
+						if(abs(ox) != r && abs(oy) != r) continue;
+
+						const int cx = bw / 2 + ox * 64, cy = bh / 2 + oy * 64;
+						bool frei = true;
+
+						for(int z = 0; z < zeilen && frei; z++)
+							for(int sp = 0; sp < spalten && frei; sp++)
+								for(int seite = 0; seite < 2 && frei; seite++)
+								{
+									const int x = seite ? cx + luecke + sp * abst : cx - luecke - (sp + 1) * abst;
+									const int y = cy + z * abst;
+									int sx, sy;
+
+									if(zmap.WithinImpassable(x, y, abst, abst, sx, sy, true)) frei = false;
+								}
+
+						if(frei) { gx = cx; gy = cy; }
+					}
+
+			if(gx < 0)
+				ZLOG("Messlauf: ZOD_BENCHARMY %ld -- kein freier Platz gefunden\n", (long)n);
+			else
+			{
+				int gemacht = 0;
+
+				for(int g = 0; g < n; g++)
+				{
+					const int z = g / spalten, sp = g % spalten;
+					const unsigned char typ = (unsigned char)(g % MAX_ROBOT_TYPES);
+
+					if(CreateRobotGroup(typ, gx - luecke - (sp + 1) * abst, gy + z * abst, RED_TEAM, nullptr, -1, 100)) gemacht++;
+					if(CreateRobotGroup(typ, gx + luecke + sp * abst, gy + z * abst, BLUE_TEAM, nullptr, -1, 100)) gemacht++;
+				}
+
+				ZLOG("Messlauf: ZOD_BENCHARMY %ld -- %ld Gruppen bei %ld,%ld (Karte %ldx%ld)\n",
+				     (long)n, (long)gemacht, (long)gx, (long)gy, (long)bw, (long)bh);
+			}
+		}
+	}
+#endif
 
 	//if we have a new object_list then we need a new flag list
 	//ols.SetupFlagList();

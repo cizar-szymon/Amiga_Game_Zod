@@ -17,6 +17,9 @@ extern "C" void zod_dirty_force_full(void);
 extern "C" int  zod_dirty_scroll(int dx, int dy, int rx, int ry, int rw, int rh);
 extern "C" void zod_dirty_scrollblit_begin(void);
 extern "C" void zod_dirty_scrollblit_end(void);
+extern "C" void zod_fenster_stempel(int x, int y, int w, int h);
+extern "C" int  zod_fenster_schub(SDL_Surface *bg, int bx, int by, int dx, int dy,
+                                  int rx, int ry, int rw, int rh);
 /* port/amiga/sdl_video.cpp -- Freiliste der Flaechenkoepfe */
 extern "C" void zod_kopf_pool_leeren(void);
 extern "C" int  zod_dirty_prev_runs(int blockzeile, short *x0, short *x1, int max);
@@ -347,6 +350,8 @@ void ZMap::DoRender(SDL_Surface *dest, int shift_x_dest, int shift_y_dest)
          * nur Streifen und Objekte (port/amiga/sdl_video.cpp,
          * zod_dirty_scroll). Sonst wie bisher alles. */
         bool blitscroll = false;
+        const int schub_dx = shift_x - letzter_shift_x;
+        const int schub_dy = shift_y - letzter_shift_y;
 
         if(verschoben && view_w == letzte_view_w && view_h == letzte_view_h &&
            letzter_shift_x >= 0 && letzter_shift_y >= 0 &&
@@ -372,8 +377,14 @@ void ZMap::DoRender(SDL_Surface *dest, int shift_x_dest, int shift_y_dest)
             to_rect.x = static_cast<short>(shift_x_dest);
             to_rect.y = static_cast<short>(shift_y_dest);
 
+            /* Warp F3: Zeichenflaeche verschieben, nur Streifen und die
+             * Stellen der alten Objekte nachholen (zod_fenster_schub,
+             * port/amiga/sdl_video.cpp). Sonst der volle Blit. */
             zod_dirty_scrollblit_begin();
-            GetRender().BlitSurface(&from_rect, &to_rect);
+            if(!zod_fenster_schub(GetRender().GetBaseSurface(), shift_x, shift_y,
+                                  schub_dx, schub_dy, shift_x_dest, shift_y_dest,
+                                  view_w, view_h))
+                GetRender().BlitSurface(&from_rect, &to_rect);
             zod_dirty_scrollblit_end();
 
             return;
@@ -660,6 +671,9 @@ void ZMap::RenderTile(unsigned int index)
     //blit tile to the image
     planet_template[basic_info.terrain_type].BlitSurface(
                 &from_rect, &to_rect, &full_render);
+#ifdef __amigaos__
+    zod_fenster_stempel(to_rect.x, to_rect.y, 16, 16);
+#endif
     //SDL_BlitSurface(planet_template[basic_info.terrain_type].GetBaseSurface(), &from_rect, full_render.GetBaseSurface(), &to_rect);
 }
 // =========================================================
@@ -2256,6 +2270,9 @@ bool ZMap::PermStamp(int x_, int y_, ZSDL_Surface *surface, bool mark_stamped)
     to_rect.y = static_cast<Sint16>(y_);
 
     surface->BlitSurface(nullptr, &to_rect, &full_render);
+#ifdef __amigaos__
+    zod_fenster_stempel(x_, y_, surface->GetBaseSurface()->w, surface->GetBaseSurface()->h);
+#endif
     //SDL_BlitSurface( surface, nullptr, full_render, &to_rect);
 
     if(stamp_hook) stamp_hook(stamp_ctx, x_, y_, surface->GetBaseSurface()->w, surface->GetBaseSurface()->h);
@@ -2287,6 +2304,9 @@ void ZMap::PermStampClip(int x_, int y_, ZSDL_Surface *surface, int cx0, int cy0
     to_rect.h = 0;
 
     surface->BlitSurface(&from_rect, &to_rect, &full_render);
+#ifdef __amigaos__
+    zod_fenster_stempel(x0, y0, x1 - x0, y1 - y0);
+#endif
 }
 
 bool ZMap::PermStamp(int x_, int y_, SDL_Surface *surface, bool mark_stamped)
@@ -2303,6 +2323,9 @@ bool ZMap::PermStamp(int x_, int y_, SDL_Surface *surface, bool mark_stamped)
     to_rect.y = static_cast<Sint16>(y_);
 
     full_render.BlitOnToMe(nullptr, &to_rect, surface);
+#ifdef __amigaos__
+    zod_fenster_stempel(x_, y_, surface->w, surface->h);
+#endif
 
     if(stamp_hook) stamp_hook(stamp_ctx, x_, y_, surface->w, surface->h);
 
@@ -2728,8 +2751,12 @@ void ZMap::DeletePathfindingInfo()
 // =========================================================
 // *********************************************************
 // =========================================================
+extern "C" { unsigned long zod_barriere_n = 0; }
+
 bool ZMap::EngageBarrierBetweenCoords(int x1, int y1, int x2, int y2)
 {
+    zod_barriere_n++;
+
     ZPath_Finding_Bresenham bline;
     int x, y;
 

@@ -491,6 +491,12 @@ class QZOD_DNOBJECTSSHARED_EXPORT ZObject
 		void Engage(ZObject *attack_object_);
 		bool Disengage();
 		void CheckPassiveEngage(double &the_time, ZOLists &ols);
+		/* Warp F3: die Suchschleife von CheckPassiveEngage als reine Funktion,
+		 * ueber die ganze Liste (idx == nullptr) oder nur ueber die Stellen
+		 * idx[0..n) der Liste (aufsteigend, aus dem Raster). Aendert nichts. */
+		void PassiveScan(vector<ZObject*> &liste, const int *idx, int n,
+		                 ZObject *&engage, vector<ZObject*> &agro,
+		                 vector<ZObject*> &enter);
 		bool IsMoving();
 		//virtual bool ServerFireTurrentMissile(int &x_, int &y_, int &damage, int &radius, double &offset_time);
 		virtual vector<fire_missile_info> ServerFireTurrentMissile(int &damage, int &radius);

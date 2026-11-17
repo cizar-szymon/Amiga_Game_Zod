@@ -255,20 +255,18 @@ bool points_within_distance(int x1, int y1, int x2, int y2, int distance)
 	if(y2 < y1 - distance) return false;
 	if(y2 > y1 + distance) return false;
 
-	//semi quick tests
-    // TODO static_cast & round
-    int sh_dist = static_cast<int>(std::floor(distance * 0.707106781 + 0.5)); //sin(45)
-	int dx = abs(x1 - x2);
-	int dy = abs(y1 - y2);
-	if(dx < sh_dist && dy < sh_dist) return true;
+	/* Warp F3 (plan 6u): ganzzahlig statt floor + sqrt. Das Original prueft
+	 * erst ein inneres Quadrat (Seite floor(0,7071 d + 0,5)) und sonst
+	 * sqrt(dx^2 + dy^2) <= d. Das Quadrat liegt ganz im Kreis, und fuer ganze
+	 * Zahlen gilt sqrt(n) <= d genau dann, wenn n <= d^2 -- also dasselbe
+	 * Ergebnis. Auf dem Amiga kostete die alte Fassung ~1,2 us je Aufruf
+	 * (floor ist ein Aufruf der mathieeedoubbas.library), und sie laeuft in
+	 * CheckPassiveEngage 1-2 mal je Paar. Erschoepfender Test:
+	 * tests/host/pwd_test.c (d = -3..1100, alle dx/dy, 0 Abweichungen). */
+	const int dx = x1 - x2;
+	const int dy = y1 - y2;
 
-    //slow test
-    if(sqrt((dx * dx) + (dy * dy)) > distance) // TODO delete (float)
-        return false;
-
-
-//    static_cast<int>
-	return true;
+	return dx * dx + dy * dy <= distance * distance;
 }
 
 bool points_within_area(int px, int py, int ax, int ay, int aw, int ah)

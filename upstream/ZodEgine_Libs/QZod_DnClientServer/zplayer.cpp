@@ -3762,6 +3762,109 @@ void ZPlayer::ProcessScroll()
 	//dont scroll if it isn't all loaded
 	if(!graphics_loaded) return;
 
+	/* Messlauf Warp (SetEnv ZOD_BENCHFOLLOW ein): die Kamera springt alle 8 s
+	 * dorthin, wo die meisten Einheiten (Roboter, Fahrzeuge, Kanonen) in einen
+	 * Ausschnitt passen -- in einem Messlauf mit Bots ist das die Schlacht.
+	 * Alle 10 s eine Zeile: Bilder/s, Einheiten gesamt / im Ausschnitt,
+	 * Effekte, laengstes Bild. Ohne den Schalter unveraendert. */
+	{
+		static int bf_an = -1;
+		static double bf_sprung = 0, bf_zeile = 0, bf_letztes = 0, bf_max = 0, bf_start = 0;
+		static long bf_bilder = 0;
+		static unsigned long bf_sicht_summe = 0;
+
+		if(bf_an < 0)
+		{
+			char buf[16];
+			const char *e = zod_env("ZOD_BENCHFOLLOW", buf, sizeof(buf));
+
+			bf_an = (e && (*e == '1' || *e == 'e' || *e == 'E' || *e == 'j')) ? 1 : 0;
+
+			if(bf_an) ZLOG("Messlauf: Kamera folgt der groessten Ansammlung (ZOD_BENCHFOLLOW)\n");
+
+			bf_sprung = bf_zeile = bf_letztes = bf_start = the_time;
+		}
+
+		if(bf_an)
+		{
+			int sx, sy, vw, vh;
+
+			zmap.GetViewShiftFull(sx, sy, vw, vh);
+
+			vector<ZObject*> einheiten;
+
+			einheiten.reserve(ols.mobile_olist.size() + ols.cannon_olist.size());
+			einheiten.insert(einheiten.end(), ols.mobile_olist.begin(), ols.mobile_olist.end());
+			einheiten.insert(einheiten.end(), ols.cannon_olist.begin(), ols.cannon_olist.end());
+
+			const double dt = the_time - bf_letztes;
+
+			bf_letztes = the_time;
+			bf_bilder++;
+			if(dt > bf_max) bf_max = dt;
+
+			{
+				int sicht = 0;
+
+				for(vector<ZObject*>::iterator i = einheiten.begin(); i != einheiten.end(); i++)
+				{
+					int cx, cy;
+
+					(*i)->GetCenterCords(cx, cy);
+					if(cx >= sx && cx < sx + vw && cy >= sy && cy < sy + vh) sicht++;
+				}
+
+				bf_sicht_summe += (unsigned long)sicht;
+			}
+
+			if(the_time - bf_sprung >= 8.0 && vw > 0 && vh > 0)
+			{
+				bf_sprung = the_time;
+
+				int best = -1, bx = 0, by = 0;
+
+				for(vector<ZObject*>::iterator i = einheiten.begin(); i != einheiten.end(); i++)
+				{
+					int ax, ay, n = 0;
+
+					(*i)->GetCenterCords(ax, ay);
+
+					for(vector<ZObject*>::iterator j = einheiten.begin(); j != einheiten.end(); j++)
+					{
+						int cx, cy;
+
+						(*j)->GetCenterCords(cx, cy);
+						if(cx >= ax - vw / 2 && cx < ax + vw / 2 && cy >= ay - vh / 2 && cy < ay + vh / 2) n++;
+					}
+
+					if(n > best) { best = n; bx = ax; by = ay; }
+				}
+
+				const int nx = bx - vw / 2, ny = by - vh / 2;
+
+				/* nur springen, wenn es sich lohnt -- jeder Sprung ist ein volles Bild */
+				if(best > 0 && (abs(nx - sx) > vw / 4 || abs(ny - sy) > vh / 4))
+					zmap.SetViewShift(nx, ny);
+			}
+
+			if(the_time - bf_zeile >= 10.0)
+			{
+				const double span = the_time - bf_zeile;
+
+				ZLOG("Verlauf t=%ld s: %ld Bilder/s*10, Einheiten %ld, im Ausschnitt %ld, Effekte %ld, laengstes Bild %ld ms\n",
+				     (long)(the_time - bf_start + 0.5),
+				     (long)(bf_bilder * 10.0 / span), (long)einheiten.size(),
+				     bf_bilder ? (long)(bf_sicht_summe / (unsigned long)bf_bilder) : 0L,
+				     (long)effect_list.size(), (long)(bf_max * 1000.0));
+
+				bf_zeile = the_time;
+				bf_bilder = 0;
+				bf_sicht_summe = 0;
+				bf_max = 0;
+			}
+		}
+	}
+
 	/* Messlauf Warp (SetEnv ZOD_BENCHSCROLL ein): wie dauernd gehaltene
 	 * Pfeiltasten rechts+unten, gleiche Geschwindigkeit wie die Tasten; an
 	 * der Kartengrenze kehrt die Richtung um. Nur zum Messen des Scrollens

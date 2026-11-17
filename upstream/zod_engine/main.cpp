@@ -58,6 +58,8 @@ extern "C" void zod_game_sections_report(long frames);
 extern "C" void zod_sortcache_report(void);
 extern "C" void zod_objdraw_report(void);
 extern "C" void zod_blitkey_report(void);
+extern "C" void zod_fensterschub_report(void);
+extern "C" void zod_pe_raster_report(void);
 extern "C" void zod_rockbake_report(void);
 /* zsdl_opengl.cpp -- Spitzenwerte des Skalierers und Groessenhistogramm */
 extern "C" void zod_roto_peak_report(unsigned long *calls, unsigned long *made,
@@ -705,6 +707,8 @@ void run_single_player()
                     zod_sortcache_report();
                     zod_objdraw_report();
                     zod_blitkey_report();
+                    zod_fensterschub_report();
+                    zod_pe_raster_report();
                     zod_rockbake_report();
 
                     /* Der Mittelwert kann einen Einbruch nicht zeigen. */

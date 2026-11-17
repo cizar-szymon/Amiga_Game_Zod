@@ -264,6 +264,7 @@ extern "C" void zod_surface_big_hint(int on)
 extern "C" int zod_dirty_get_luecke(void) { return luecke; }
 
 static void rechteck_ungueltig(void);   /* weiter unten, Scrollen */
+extern "C" { static void fen_einrichten(SDL_Surface *s); }   /* weiter unten, Fensterschub */
 
 extern "C" void zod_dirty_set_target(SDL_Surface *s)
 {
@@ -305,6 +306,8 @@ extern "C" void zod_dirty_set_target(SDL_Surface *s)
 	         : "libnix (ZOD_ROTOMEM libnix)");
 
 	dirty_target = s;
+
+	fen_einrichten(s);
 
 	grid_w = s ? ((s->w + (1 << ZOD_BLOCK_SHIFT) - 1) >> ZOD_BLOCK_SHIFT) : 0;
 	grid_h = s ? ((s->h + (1 << ZOD_BLOCK_SHIFT) - 1) >> ZOD_BLOCK_SHIFT) : 0;
@@ -588,6 +591,355 @@ extern "C" void zod_dirty_out_mark(int x, int y, int w, int h)
 
 extern "C" void zod_dirty_scrollblit_begin(void) { im_scrollblit = 1; }
 extern "C" void zod_dirty_scrollblit_end(void)   { im_scrollblit = 0; }
+
+/* ---- Fensterschub: Zeichenflaeche verschieben statt neu fuellen ----------
+ * (Warp F3, 17.11.2026)
+ *
+ * Beim Scrollen kopierte ZMap::DoRender in JEDEM Bild den ganzen
+ * Kartenausschnitt aus der Kartenflaeche in die Zeichenflaeche (640x480:
+ * ~240 KB, 9,6 ms auf Amiga 1 -- die groesste Einzelpost im Scrollbild).
+ *
+ * Jetzt liegt die Zeichenflaeche in einem groesseren Block, und beim Scrollen
+ * wandert nur ihr Pixelzeiger um dy*pitch + dx. Dann steht im Ausschnitt R
+ * schon das alte Bild, um d verschoben -- genau das, was der Blitter im
+ * Grafikspeicher auch daraus macht. Aus der Kartenflaeche geholt wird nur:
+ *   1. die freigelegten Streifen,
+ *   2. was im LETZTEN Bild ueber den Hintergrund gezeichnet wurde (Objekte,
+ *      Meldungen, Fenster -- die Rechteckliste bzw. die Blockspur), versetzt.
+ * Alles AUSSERHALB von R (Anzeige rechts und unten) darf sich nicht bewegen:
+ * es wird vom alten an den neuen Platz zurueckkopiert (Kopie mit Ueberlappung,
+ * Reihenfolge nach der Richtung des Schubs).
+ *
+ * Laeuft der Zeiger aus dem Block, wird er in die Mitte gesetzt und R wie
+ * bisher ganz gefuellt (Rueckgabe 0).
+ *
+ * Grundsatz wie beim Blitter-Scrollen: danach muss R in der Zeichenflaeche
+ * GENAU der Kartenhintergrund sein. `SetEnv ZOD_FENSTER 2` prueft das in
+ * jedem Schub Byte fuer Byte gegen die Kartenflaeche (und stellt bei einer
+ * Abweichung den vollen Hintergrund her), `ZOD_FENSTER aus` = alter Weg. */
+static int fen_modus = -1;              /* 0 aus, 1 an, 2 an + Pruefung */
+static unsigned char *fen_block = 0, *fen_lo = 0, *fen_hi = 0, *fen_mitte = 0;
+static SDL_Surface *fen_flaeche = 0;
+unsigned long zod_fen_schuebe = 0, zod_fen_mitte = 0, zod_fen_rechtecke = 0;
+unsigned long zod_fen_geprueft = 0, zod_fen_falsch = 0, zod_fen_falsch_punkte = 0;
+unsigned long long zod_fen_bytes = 0, zod_fen_rand_bytes = 0;
+
+static int fen_modus_lesen(void)
+{
+	if(fen_modus >= 0) return fen_modus;
+
+	char wahl[16];
+
+	/* VORGABE AUS (Amiga 1, 17.11.2026, plan 6r): R wird billiger (640x480
+	 * 9,7 -> 7,4 ms), aber der verschobene Zeiger liegt nicht mehr auf
+	 * derselben 16-Byte-Lage wie der Grafikspeicher -- die Bildausgabe
+	 * verliert MOVE16 und wird um genau so viel teurer (4,2 -> 6,3 ms;
+	 * 800x600 sogar 6,0 -> 9,6). Netto 0 bzw. -3 %. */
+	fen_modus = 0;
+
+	if(zod_env("ZOD_FENSTER", wahl, sizeof(wahl)))
+	{
+		if(wahl[0] == '1' || wahl[0] == 'e' || wahl[0] == 'E' ||
+		   ((wahl[0] == 'a' || wahl[0] == 'A') && (wahl[1] == 'n' || wahl[1] == 'N')))
+			fen_modus = 1;
+		else if(wahl[0] == '2') fen_modus = 2;
+	}
+
+	ZLOG("Fensterschub: %s\n", fen_modus == 0 ? "aus (Vorgabe; ZOD_FENSTER an / 2 zum Vergleichen)"
+	     : fen_modus == 2 ? "an, mit Pruefung gegen die Kartenflaeche (ZOD_FENSTER 2)"
+	     : "an (ZOD_FENSTER an)");
+
+	return fen_modus;
+}
+
+/* Kopie mit Ueberlappung, vorwaerts (Ziel vor der Quelle) bzw. rueckwaerts.
+ * Langwoerter, das Ziel ausgerichtet; schiefe Lesezugriffe sind ab 020 erlaubt. */
+static void fen_vor(unsigned char *d, const unsigned char *s, int n)
+{
+	while(n > 0 && ((unsigned long)d & 3)) { *d++ = *s++; n--; }
+
+	unsigned long *dl = (unsigned long*)d;
+	const unsigned long *sl = (const unsigned long*)s;
+
+	while(n >= 16) { dl[0] = sl[0]; dl[1] = sl[1]; dl[2] = sl[2]; dl[3] = sl[3]; dl += 4; sl += 4; n -= 16; }
+	while(n >= 4) { *dl++ = *sl++; n -= 4; }
+
+	d = (unsigned char*)dl;
+	s = (const unsigned char*)sl;
+
+	while(n-- > 0) *d++ = *s++;
+}
+
+static void fen_rueck(unsigned char *d, const unsigned char *s, int n)
+{
+	d += n;
+	s += n;
+
+	while(n > 0 && ((unsigned long)d & 3)) { *--d = *--s; n--; }
+
+	unsigned long *dl = (unsigned long*)d;
+	const unsigned long *sl = (const unsigned long*)s;
+
+	while(n >= 16) { dl[-1] = sl[-1]; dl[-2] = sl[-2]; dl[-3] = sl[-3]; dl[-4] = sl[-4]; dl -= 4; sl -= 4; n -= 16; }
+	while(n >= 4) { *--dl = *--sl; n -= 4; }
+
+	d = (unsigned char*)dl;
+	s = (const unsigned char*)sl;
+
+	while(n-- > 0) *--d = *--s;
+}
+
+/* Alles ausserhalb von R vom alten Zeiger `alt` an den neuen `neu`, in der
+ * Reihenfolge, in der keine Quelle ueberschrieben wird, bevor sie gelesen
+ * ist (neu > alt: von der hoechsten Adresse abwaerts). */
+static void fen_rand_umsetzen(unsigned char *alt, unsigned char *neu, int pitch,
+                              int w, int h, int rx, int ry, int rw, int rh)
+{
+	const int rueck = neu > alt;
+
+	for(int i = 0; i < h; i++)
+	{
+		const int y = rueck ? (h - 1 - i) : i;
+		const unsigned long z = (unsigned long)y * (unsigned long)pitch;
+		int sa[2], sl[2], ns = 0;
+
+		if(y < ry || y >= ry + rh) { sa[0] = 0; sl[0] = w; ns = 1; }
+		else
+		{
+			if(rx > 0) { sa[ns] = 0; sl[ns] = rx; ns++; }
+			if(rx + rw < w) { sa[ns] = rx + rw; sl[ns] = w - (rx + rw); ns++; }
+		}
+
+		for(int k = 0; k < ns; k++)
+		{
+			const int j = rueck ? (ns - 1 - k) : k;
+
+			if(rueck) fen_rueck(neu + z + sa[j], alt + z + sa[j], sl[j]);
+			else      fen_vor(neu + z + sa[j], alt + z + sa[j], sl[j]);
+
+			zod_fen_rand_bytes += (unsigned long)sl[j];
+		}
+	}
+}
+
+/* Rechteck (Schirmkoordinaten, auf R geklemmt) aus der Kartenflaeche holen.
+ * bx/by: Kartenpunkt, der auf (rx, ry) liegt. */
+static inline void fen_holen(SDL_Surface *z, SDL_Surface *bg, int bx, int by,
+                             int rx, int ry, int rw, int rh,
+                             int x0, int y0, int x1, int y1)
+{
+	if(x0 < rx) x0 = rx;
+	if(y0 < ry) y0 = ry;
+	if(x1 > rx + rw) x1 = rx + rw;
+	if(y1 > ry + rh) y1 = ry + rh;
+
+	if(x1 <= x0 || y1 <= y0) return;
+
+	zod_copy_rect((unsigned char*)z->pixels + (unsigned long)y0 * z->pitch + x0,
+	              (const unsigned char*)bg->pixels
+	                  + (unsigned long)(by + y0 - ry) * bg->pitch + (bx + x0 - rx),
+	              x1 - x0, y1 - y0, (int)z->pitch, (int)bg->pitch);
+
+	zod_fen_rechtecke++;
+	zod_fen_bytes += (unsigned long)(x1 - x0) * (unsigned long)(y1 - y0);
+}
+
+/* Geaenderte Stellen der KARTENFLAECHE (Krater, Kacheln, Steine), in
+ * Kartenpunkten, seit dem letzten Schub. Der volle Blit holte sie frueher
+ * nebenbei; ohne diese Liste stuende im verschobenen Bild noch der alte
+ * Boden (ZOD_FENSTER 2: 7 von 975 Schueben, orig07). */
+enum { FEN_STEMPEL = 128 };
+static short fen_st[FEN_STEMPEL][4];
+static int fen_st_n = 0, fen_st_voll = 0;
+unsigned long zod_fen_stempel = 0, zod_fen_stempel_voll = 0;
+
+extern "C" void zod_fenster_stempel(int x, int y, int w, int h)
+{
+	if(fen_modus <= 0 || w <= 0 || h <= 0) return;
+
+	zod_fen_stempel++;
+
+	if(fen_st_n >= FEN_STEMPEL) { fen_st_voll = 1; return; }
+
+	fen_st[fen_st_n][0] = (short)x; fen_st[fen_st_n][1] = (short)y;
+	fen_st[fen_st_n][2] = (short)w; fen_st[fen_st_n][3] = (short)h;
+	fen_st_n++;
+}
+
+/* Aus ZMap::DoRender im Scrollbild, NACH zod_dirty_scroll (das die Listen des
+ * letzten Bildes noch unveraendert vorfindet). bg = Kartenflaeche, bx/by =
+ * neuer Kartenversatz (Kartenpunkt auf rx/ry), d = Verschiebung.
+ * Rueckgabe 1 = R ist fertiger Hintergrund, 0 = Aufrufer fuellt R selbst. */
+extern "C" int zod_fenster_schub(SDL_Surface *bg, int bx, int by, int dx, int dy,
+                                 int rx, int ry, int rw, int rh)
+{
+	SDL_Surface *z = dirty_target;
+
+	if(fen_modus_lesen() == 0 || !fen_flaeche || z != fen_flaeche || !bg || !bg->pixels)
+		return 0;
+	if(bg->format->BytesPerPixel != 1 || bx < 0 || by < 0 ||
+	   bx + rw > bg->w || by + rh > bg->h)
+		return 0;
+
+	unsigned char *alt = (unsigned char*)z->pixels;
+	const long schub = (long)dy * (long)z->pitch + (long)dx;
+	unsigned char *neu = alt + schub;
+	const unsigned long bild = (unsigned long)z->pitch * (unsigned long)z->h;
+
+	if(neu < fen_lo || neu + bild > fen_hi || fen_st_voll)
+	{
+		const int st_voll = fen_st_voll;
+
+		fen_st_n = 0;
+		fen_st_voll = 0;
+
+		if(st_voll && neu >= fen_lo && neu + bild <= fen_hi)
+		{
+			/* zu viele Stempel: verschieben, aber R ganz fuellen lassen */
+			fen_rand_umsetzen(alt, neu, z->pitch, z->w, z->h, rx, ry, rw, rh);
+			z->pixels = neu;
+			zod_fen_stempel_voll++;
+
+			return 0;
+		}
+
+		/* Rand erschoepft: in die Mitte, Anzeige mitnehmen, R fuellt der
+		 * Aufrufer wie bisher. */
+		neu = fen_mitte;
+		fen_rand_umsetzen(alt, neu, z->pitch, z->w, z->h, rx, ry, rw, rh);
+		z->pixels = neu;
+		zod_fen_mitte++;
+
+		return 0;
+	}
+
+	fen_rand_umsetzen(alt, neu, z->pitch, z->w, z->h, rx, ry, rw, rh);
+	z->pixels = neu;
+	zod_fen_schuebe++;
+
+	/* 1. freigelegte Streifen */
+	if(dx > 0)      fen_holen(z, bg, bx, by, rx, ry, rw, rh, rx + rw - dx, ry, rx + rw, ry + rh);
+	else if(dx < 0) fen_holen(z, bg, bx, by, rx, ry, rw, rh, rx, ry, rx - dx, ry + rh);
+
+	if(dy > 0)      fen_holen(z, bg, bx, by, rx, ry, rw, rh, rx, ry + rh - dy, rx + rw, ry + rh);
+	else if(dy < 0) fen_holen(z, bg, bx, by, rx, ry, rw, rh, rx, ry, rx + rw, ry - dy);
+
+	/* 2. was im letzten Bild ueber den Hintergrund kam, an seinem neuen Platz
+	 *    (dieselbe Menge, die zod_dirty_scroll zur Ausgabe vermerkt) */
+	if(!rechteck_vor_voll)
+	{
+		for(int i = 0; i < rechteck_vor_n; i++)
+		{
+			const zod_rechteck &r = rechteck_vor[i];
+			int x0 = r.x - 2, y0 = r.y - 2, x1 = r.x + r.w + 2, y1 = r.y + r.h + 2;
+
+			if(x0 < rx) x0 = rx;
+			if(y0 < ry) y0 = ry;
+			if(x1 > rx + rw) x1 = rx + rw;
+			if(y1 > ry + rh) y1 = ry + rh;
+
+			if(x1 <= x0 || y1 <= y0) continue;
+
+			fen_holen(z, bg, bx, by, rx, ry, rw, rh, x0 - dx, y0 - dy, x1 - dx, y1 - dy);
+		}
+	}
+	else
+	{
+		const int block = 1 << ZOD_BLOCK_SHIFT;
+
+		for(int gy = 0; gy < grid_h; gy++)
+		{
+			int gx = 0;
+
+			while(gx < grid_w)
+			{
+				if(!prev_grid[gy][gx]) { gx++; continue; }
+
+				const int a = gx;
+
+				while(gx < grid_w && prev_grid[gy][gx]) gx++;
+
+				int x0 = a << ZOD_BLOCK_SHIFT, y0 = gy << ZOD_BLOCK_SHIFT;
+				int x1 = gx << ZOD_BLOCK_SHIFT, y1 = y0 + block;
+
+				if(x0 < rx) x0 = rx;
+				if(y0 < ry) y0 = ry;
+				if(x1 > rx + rw) x1 = rx + rw;
+				if(y1 > ry + rh) y1 = ry + rh;
+
+				if(x1 <= x0 || y1 <= y0) continue;
+
+				fen_holen(z, bg, bx, by, rx, ry, rw, rh, x0 - dx, y0 - dy, x1 - dx, y1 - dy);
+			}
+		}
+	}
+
+	/* 3. geaenderte Stellen der Kartenflaeche (Kartenpunkte -> Schirm) */
+	for(int i = 0; i < fen_st_n; i++)
+	{
+		const int x0 = fen_st[i][0] - bx + rx, y0 = fen_st[i][1] - by + ry;
+
+		fen_holen(z, bg, bx, by, rx, ry, rw, rh, x0, y0, x0 + fen_st[i][2], y0 + fen_st[i][3]);
+	}
+
+	fen_st_n = 0;
+
+	/* Pruefung: R muss jetzt genau der Kartenhintergrund sein */
+	if(fen_modus == 2)
+	{
+		unsigned long falsch = 0;
+
+		for(int y = 0; y < rh; y++)
+		{
+			const unsigned char *a = (const unsigned char*)z->pixels
+			                         + (unsigned long)(ry + y) * z->pitch + rx;
+			const unsigned char *b = (const unsigned char*)bg->pixels
+			                         + (unsigned long)(by + y) * bg->pitch + bx;
+
+			if(memcmp(a, b, (size_t)rw))
+				for(int x = 0; x < rw; x++)
+					if(a[x] != b[x])
+					{
+						if(falsch < 4 && zod_fen_falsch < 8)
+							ZLOG("Fensterschub FALSCH: Punkt %ld,%ld (d=%ld,%ld)\n",
+							     (long)(rx + x), (long)(ry + y), (long)dx, (long)dy);
+						falsch++;
+					}
+		}
+
+		zod_fen_geprueft++;
+
+		if(falsch)
+		{
+			zod_fen_falsch++;
+			zod_fen_falsch_punkte += falsch;
+
+			return 0;           /* Aufrufer stellt den vollen Hintergrund her */
+		}
+	}
+
+	return 1;
+}
+
+extern "C" void zod_fensterschub_report(void)
+{
+	if(fen_modus <= 0) return;
+
+	ZLOG("Fensterschub: %lu Schuebe, %lu mal Mitte; je Schub %lu Rechtecke, %lu Byte aus der "
+	     "Karte, %lu Byte Anzeige umgesetzt\n",
+	     zod_fen_schuebe, zod_fen_mitte,
+	     zod_fen_schuebe ? zod_fen_rechtecke / zod_fen_schuebe : 0UL,
+	     zod_fen_schuebe ? (unsigned long)(zod_fen_bytes / zod_fen_schuebe) : 0UL,
+	     (zod_fen_schuebe + zod_fen_mitte)
+	         ? (unsigned long)(zod_fen_rand_bytes / (zod_fen_schuebe + zod_fen_mitte)) : 0UL);
+
+	ZLOG("Fensterschub: %lu Stempel in der Kartenflaeche, %lu mal zu viele (voller Hintergrund)\n",
+	     zod_fen_stempel, zod_fen_stempel_voll);
+
+	if(fen_modus == 2)
+		ZLOG("Fensterschub Pruefung: %lu Schuebe geprueft, %lu falsch (%lu Punkte) -- muss 0 sein\n",
+		     zod_fen_geprueft, zod_fen_falsch, zod_fen_falsch_punkte);
+}
 
 /* Warp F3: "seit dem Hintergrund beschrieben" in 8x8-Zellen.
  *
@@ -1503,6 +1855,53 @@ SDL_Surface *SDL_CreateRGBSurface(Uint32 flags, int w, int h, int depth,
 	return s;
 }
 
+/* Fensterschub: die Zeichenflaeche in einen Block mit Rand legen (nur 8 Bit,
+ * Begruendung bei zod_fenster_schub). Die Mitte ist auf 16 Byte ausgerichtet,
+ * damit die Bildausgabe in der Ruhe MOVE16 nehmen kann. */
+static void fen_einrichten(SDL_Surface *s)
+{
+	if(!s || fen_flaeche || s->format->BytesPerPixel != 1) return;
+	if(fen_modus_lesen() == 0) return;
+
+	const unsigned long bild = (unsigned long)s->pitch * (unsigned long)s->h;
+	/* Rand je Seite: zwei Bildhoehen -- bei ~13 Zeilen je Bild in eine
+	 * Richtung rund 70 Bilder bis zur naechsten Mitte. */
+	const unsigned long rand = 2UL * bild;
+	const unsigned long gesamt = bild + 2UL * rand + 32UL;
+	unsigned char *b = (unsigned char*)zod_big_alloc(gesamt);
+
+	if(!b)
+	{
+		ZLOG("Fensterschub: kein Speicher fuer %lu KB -- aus\n", gesamt / 1024);
+		fen_modus = 0;
+		return;
+	}
+
+	memset(b, 0, gesamt);
+
+	fen_block = b;
+	fen_lo = (unsigned char*)(((unsigned long)b + 15UL) & ~15UL);
+	fen_mitte = fen_lo + rand;
+	fen_hi = fen_lo + bild + 2UL * rand;
+
+	SurfaceExtra *x = extra_of(s);
+
+	memcpy(fen_mitte, s->pixels, bild);
+
+	if(x->own_pixels && s->pixels)
+	{
+		if(x->big) zod_big_free(s->pixels);
+		else free(s->pixels);
+	}
+
+	x->own_pixels = 0;
+	s->pixels = fen_mitte;
+	fen_flaeche = s;
+
+	ZLOG("Fensterschub: Zeichenflaeche in %lu KB (Rand je Seite %lu KB)\n",
+	     gesamt / 1024, rand / 1024);
+}
+
 SDL_Surface *SDL_CreateRGBSurfaceFrom(void *pixels, int w, int h, int depth, int pitch,
                                       Uint32 rmask, Uint32 gmask, Uint32 bmask, Uint32 amask)
 {
@@ -1528,6 +1927,15 @@ void SDL_FreeSurface(SDL_Surface *surface)
 	if(--surface->refcount > 0) return;
 
 	SurfaceExtra *x = extra_of(surface);
+
+	if(surface == fen_flaeche)
+	{
+		/* Pixel liegen im Fensterblock (fen_einrichten) */
+		zod_big_free(fen_block);
+		fen_block = fen_lo = fen_hi = fen_mitte = 0;
+		fen_flaeche = 0;
+		surface->pixels = 0;
+	}
 
 	if(x->own_pixels && surface->pixels)
 	{
