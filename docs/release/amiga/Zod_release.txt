@@ -10,6 +10,8 @@ Shellu) i logiem (-L RAM:zod-log.txt w polu "Arguments" w ZodLaunch).
 -----------------
 
   - Ekran ładowania pokazuje postęp w procentach ("LOADING 37%").
+  - zod_040 dla 68040 (Warp 1240) obok zod_060; przy pierwszym starcie
+    ZodLaunch sam wybiera wersję dla procesora.
   - Dane gry są czytane dużymi blokami: od uruchomienia gry do pierwszej
     mapy mija ok. 9 sekund na Warp 7060.
 

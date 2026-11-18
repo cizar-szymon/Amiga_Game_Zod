@@ -13,6 +13,7 @@ BAUEN
 Cross-Compiler: m68k-amigaos-gcc von bebbo (libnix, -noixemul).
 
   make PLATFORM=amiga CPU=68060            das Spiel: build/amiga/zod_060
+  make PLATFORM=amiga CPU=68040            dasselbe für den 68040: zod_040
   make PLATFORM=amiga CPU=68060 launcher   ZodLaunch (braucht MUI-Header)
   make PLATFORM=amiga CPU=68060 jvplay     der Filmspieler
   make PLATFORM=amiga CPU=68060 extract    ZExtract

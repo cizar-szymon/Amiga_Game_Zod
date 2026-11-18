@@ -15,10 +15,11 @@ VORAUSSETZUNGEN
 ---------------
 
   Rechner    Amiga 500 / 1200 / 3000 / 4000 mit Warp-Karte (Warp 560,
-             1240, 1260, 1260 Extreme, 7060) und 68060.
+             1240, 1260, 1260 Extreme, 7060): 68060, auf der Warp 1240
+             68040.
              Getestet auf: A1200 + Warp 1260 Extreme (68060, 100 MHz) und
-             A4000 + Warp 7060. Andere Amigas mit 68060 und RTG starten
-             das Spiel, aber langsamer.
+             A4000 + Warp 7060. Andere Amigas mit 68040 oder 68060 und RTG
+             starten das Spiel, aber langsamer.
   System     AmigaOS 3.2, Picasso96 (RTG der Warp-Karte)
   Speicher   mindestens 32 MB Fast RAM
   MUI        3.8 oder neuer, für ZodLaunch (das Spiel selbst braucht es nicht)
@@ -33,7 +34,8 @@ Sekunde; große Schlachten mit etwa 200 Robotern etwa 15.
 INHALT
 ------
 
-  - das Spiel (zod_060), das Einstellungsfenster ZodLaunch, ZExtract (liest
+  - das Spiel (zod_060 für den 68060, zod_040 für den 68040), das
+    Einstellungsfenster ZodLaunch, ZExtract (liest
     die Daten von der CD), jvplay (spielt die Filme)
   - Original Z Story Mode: die 35 originalen Karten der Reihe nach, die
     Filme und das Statistikbild nach jeder Runde
@@ -55,7 +57,8 @@ werden beim Start des Spiels und beim Schließen des Fensters gespeichert.
   Cutscenes      spielt die Filme (wenn sie in cuts/ liegen)
   Music          braucht music/MIDIBANK, siehe Install.txt
   Music output   AHI oder Paula
-  Binary         zod_060
+  Binary         zod_060 (68060) oder zod_040 (68040); beim ersten Start
+                 wählt ZodLaunch die Fassung für Ihren Prozessor
   Arguments      weitere Optionen für das Spiel, z. B. -L RAM:zod-log.txt
 
 

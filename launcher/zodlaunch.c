@@ -996,6 +996,26 @@ int main(int argc, char **argv)
     cfg_vorgaben();
     cfg_laden();
 
+    /* Warp (18.11.2026): steht noch kein Programm in ZodLaunch.cfg (frisch
+     * ausgepackt), wird es nach dem Prozessor vorgeschlagen -- 68060:
+     * zod_060, 68040: zod_040 (Warp 1240). Nur wenn die Datei auch da ist;
+     * sonst bleibt das Feld leer wie bisher. Die Wahl bleibt im Feld
+     * "Binary" aenderbar und wird gespeichert. */
+    if(!cfg.binaer[0])
+    {
+        const char *vorschlag = 0;
+        BPTR l;
+
+        if(SysBase->AttnFlags & (1 << 7))       vorschlag = "zod_060";   /* AFB_68060 */
+        else if(SysBase->AttnFlags & (1 << 3))  vorschlag = "zod_040";   /* AFB_68040 */
+
+        if(vorschlag && (l = Lock((CONST_STRPTR)vorschlag, SHARED_LOCK)) != 0)
+        {
+            UnLock(l);
+            binaer_setzen(vorschlag);
+        }
+    }
+
     /* Vor dem Aufbau der Oberflaeche: ahi.device muss offen sein, sonst
      * kann das Feld den Namen des eingestellten Modus nicht zeigen. */
     ahi_oeffnen();

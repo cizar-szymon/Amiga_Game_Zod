@@ -6,7 +6,7 @@
 # releases/ is NOT in git (.gitignore): the archive carries the engine's own data
 # (zod_engine.zpk, maps), which stays out of the repository like in Cego's port.
 # Contents:
-#       zod_060, ZodLaunch(.info), ZExtract, jvplay, ZodLaunch.cfg, map/story lists,
+#       zod_060, zod_040, ZodLaunch(.info), ZExtract, jvplay, map/story lists,
 #       default_settings.txt, Data/ (maps), assets/ (tile info),
 #       packs/ (palette.zpl, zod_engine.zpk: the engine's own data, + ReadMe),
 #       music/ and cuts/ (empty, ReadMe), doc/ (all texts EN/PL/DE, COPYING)
@@ -41,7 +41,9 @@ G=$R/ZOD
 B=build/amiga
 
 # the programs must carry this number
-grep -a -q "\$VER: Zod $V " $B/zod_060 || { echo "$B/zod_060 is not $V: build first" >&2; exit 1; }
+for p in zod_060 zod_040; do
+	grep -a -q "\$VER: Zod $V " $B/$p || { echo "$B/$p is not $V: build first (CPU=68060 / CPU=68040)" >&2; exit 1; }
+done
 grep -a -q "\$VER: ZodLaunch $V " $B/ZodLaunch || { echo "$B/ZodLaunch is not $V: make launcher first" >&2; exit 1; }
 for f in ZExtract jvplay; do [ -f $B/$f ] || { echo "$B/$f missing" >&2; exit 1; }; done
 for f in packs/palette.zpl packs/zod_engine.zpk map_list.txt story_list.txt default_settings.txt; do
@@ -51,8 +53,8 @@ done
 
 rm -rf "$G"
 mkdir -p "$G/packs" "$G/music" "$G/cuts" "$G/doc"
-cp $B/zod_060 $B/ZodLaunch $B/ZExtract $B/jvplay "$G/"
-cp "$D/ZodLaunch.cfg" "$G/"
+# no ZodLaunch.cfg: on its first start ZodLaunch picks zod_060 or zod_040 by the CPU
+cp $B/zod_060 $B/zod_040 $B/ZodLaunch $B/ZExtract $B/jvplay "$G/"
 cp "$E/map_list.txt" "$E/story_list.txt" "$E/default_settings.txt" "$G/"
 cp -r "$E/Data" "$E/assets" "$G/"
 cp "$E/packs/palette.zpl" "$E/packs/zod_engine.zpk" "$G/packs/"

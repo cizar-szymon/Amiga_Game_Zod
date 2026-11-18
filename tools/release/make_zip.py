@@ -14,7 +14,7 @@ import os
 import zipfile
 
 KEEP = {"packs": (".ZPK", ".DAT"), "music": (".ZMU", "MIDIBANK"), "cuts": (".JV",)}
-EXECUTABLES = {"zod_060", "ZodLaunch", "ZExtract", "jvplay"}	# the programs: must get the Amiga's E bit
+EXECUTABLES = {"zod_060", "zod_040", "ZodLaunch", "ZExtract", "jvplay"}	# the programs: must get the Amiga's E bit
 
 
 def put(z, path, arcname, method=zipfile.ZIP_DEFLATED):

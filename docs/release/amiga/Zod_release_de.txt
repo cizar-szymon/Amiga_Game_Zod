@@ -11,6 +11,8 @@ Ausgabenummer (Spielmenü "Warp x.xx", Titel von ZodLaunch oder
 -----------------
 
   - Das Ladebild zeigt den Fortschritt in Prozent ("LOADING 37%").
+  - zod_040 für den 68040 (Warp 1240) neben zod_060; beim ersten Start
+    wählt ZodLaunch die Fassung für den Prozessor.
   - Die Spieldaten werden in großen Blöcken gelesen: vom Start des Spiels
     bis zur ersten Karte vergehen auf einer Warp 7060 etwa 9 Sekunden.
 

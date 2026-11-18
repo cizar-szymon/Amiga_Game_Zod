@@ -84,8 +84,6 @@ PROGDIR:*
 # release: older public archives and anything private (never in git)
 private/
 
-# Warp: die Einstellungsvorgabe des Ausgabepakets gehoert hinein (nur binaer=zod_060)
-!docs/release/amiga/ZodLaunch.cfg
 
 # Warp: das fertige Ausgabepaket (tools/release/make_release.sh) traegt die Daten
 # der Engine (zod_engine.zpk, Karten) -- es kommt NICHT ins Repository, sondern
