@@ -2,6 +2,7 @@
 #include "fineclock.h"   /* feine Uhr -- current_time() loest hier 20 ms auf */
 #include "amiga_startup.h"   /* zod_env */
 #include <string.h>   /* memcmp: Merkfeld */
+#include <stdlib.h>   /* atoi: ZOD_ENDTEST */
 extern "C" unsigned long zod_ps_ticks[8], zod_ps_n[8], zod_pe_scan_ticks, zod_pe_scan_n, zod_pe_rest_ticks,
 	zod_pe_q_ticks, zod_pe_loop_ticks, zod_pe_ord_ticks, zod_pe_ord_n, zod_pe_ord_kand;
 extern "C" unsigned long zod_wp_ticks[16], zod_wp_n[16];
@@ -625,15 +626,93 @@ void ZServer::CheckResetGame()
 	DoResetGame();
 }
 
+/* Testschalter ZOD_ENDTEST "<sek> [folge]" (18.11.): beendet jede Runde nach
+ * <sek> Sekunden Spielzeit. Die Folge aus s (Sieg) und n (Niederlage) gilt
+ * reihum, Runde fuer Runde ("15 ns": verloren, gewonnen, verloren, ...);
+ * ohne Folge immer Sieg. Das Ergebnis gilt fuer ALLE Teams -- der Klient nimmt nur die Meldung fuer sein eigenes. Damit
+ * lassen sich Sieg-, Niederlage- und Aufbruchsfilme samt Statistik pruefen,
+ * ohne eine Karte durchzuspielen. Ohne den Schalter aendert sich nichts. */
+static int    zod_endtest_sek = -2;      /* -2 ungelesen, -1 aus */
+static bool   zod_endtest_sieg = true;
+static char   zod_endtest_folge[16] = "s";
+static int    zod_endtest_runde = 0;
+static bool   zod_endtest_lief = false;
+static double zod_endtest_start = 0;
+
+/* Liest den Schalter einmal. Auch beim Kartenstart gebraucht: mit dem
+ * Schalter beginnt die Karte ohne "Click to Start", sonst liefe die Uhr
+ * im Test nie an. */
+static void zod_endtest_lesen(void)
+{
+	char wahl[16];
+
+	if(zod_endtest_sek != -2) return;
+
+	zod_endtest_sek = -1;
+
+	if(zod_env("ZOD_ENDTEST", wahl, sizeof(wahl)))
+	{
+		zod_endtest_sek = atoi(wahl);
+		int n = 0;
+
+		for(const char *c = wahl; *c && n < (int)sizeof(zod_endtest_folge) - 1; c++)
+			if(*c == 's' || *c == 'S' || *c == 'n' || *c == 'N')
+				zod_endtest_folge[n++] = (*c == 'n' || *c == 'N') ? 'n' : 's';
+
+		if(n) zod_endtest_folge[n] = 0;
+
+		ZLOG("ZOD_ENDTEST: Rundenende nach %d s, Folge %s, Karten starten ohne Pause\n",
+		     zod_endtest_sek, zod_endtest_folge);
+	}
+}
+
 void ZServer::CheckEndGame()
 {
 	double &the_time = ztime.ztime;
 
-	if(!game_on) return;
+	zod_endtest_lesen();
+
+	if(!game_on)
+	{
+		zod_endtest_lief = false;
+		return;
+	}
+
+	if(!zod_endtest_lief)
+	{
+		zod_endtest_lief = true;
+		zod_endtest_start = the_time;
+	}
 
 	if(the_time >= next_end_game_check_time)
 	{
 		next_end_game_check_time = the_time + 1.0;
+
+		if(zod_endtest_sek >= 0 && the_time - zod_endtest_start >= zod_endtest_sek)
+		{
+			zod_endtest_sieg = zod_endtest_folge[zod_endtest_runde % strlen(zod_endtest_folge)] == 's';
+			zod_endtest_runde++;
+
+			ZLOG("ZOD_ENDTEST: Runde %d beendet (%s)\n", zod_endtest_runde,
+			     zod_endtest_sieg ? "Sieg" : "Niederlage");
+
+			for(int i=RED_TEAM;i<MAX_TEAM_TYPES;i++)
+				RelayTeamEnded(i, zod_endtest_sieg);
+
+			UpdateUsersWinLoses();
+			game_on = false;
+			zod_endtest_lief = false;
+
+			if(map_list.size())
+			{
+				do_reset_game = true;
+				next_reset_game_time = COMMON::current_time() + 10.0;
+			}
+
+			BroadCastNews("<<<< The game has ended >>>>");
+			server_socket.SendMessageAll(END_GAME, nullptr, 0);
+			return;
+		}
 
 		if(EndGameRequirementsMet())
 			ProcessEndGame();
@@ -736,7 +815,8 @@ void ZServer::LoadNextMap(string override_map_name)
 	InitObjects();
 	InitZones();
 
-	if(psettings.start_map_paused) PauseGame();
+	zod_endtest_lesen();
+	if(psettings.start_map_paused && zod_endtest_sek < 0) PauseGame();
 
 	game_on = true;
 }
