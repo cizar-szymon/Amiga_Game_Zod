@@ -4,6 +4,118 @@
 #include "zpath_finding_old.h"
 #include <amiga_startup.h>   /* zod_env -- getenv sieht unter libnix kein SetEnv */
 #include "zod_log.h"
+#include "fineclock.h"   /* Warp F3: Zeitmessung der A*-Schleife */
+
+/* ---- Warp F3 (18.11.2026): kompakte Kacheldaten fuer A* -----------------
+ *
+ * A* las je Expansion bis zu ~20 Kacheln aus map_pathfinding_info_tile
+ * (12 Byte, Spalten einzeln belegt). Auf dem Warp ist jeder Fehlgriff an
+ * L2 (96 KB) vorbei ein DDR3-Zugriff von 600-800 ns; gemessen ~25 us je
+ * Expansion. Hier dieselben Daten in 4 Byte je Kachel, ein Block, Index
+ * x*h+y: Bit 31 passierbar, Bits 0-14 side_weight, 15-29 diag_weight.
+ *
+ * Je Tabelle (robot, robot_norocks, vehicle, vehicle_norocks) eine Kopie,
+ * faul gebaut. Ungueltig nach SetTileInfo / SetTileWideWeights / neuer
+ * Belegung; SetImpassable traegt die eine Kachel nach. Passt ein Gewicht
+ * nicht in 15 Bit, bleibt diese Tabelle auf dem alten Weg.
+ * ZOD_PFTILECHECK: jeder Zugriff liest zusaetzlich das Original und
+ * zaehlt Abweichungen. */
+namespace
+{
+    struct pf_kompakt
+    {
+        map_pathfinding_info_tile **src;
+        int w, h;
+        int gueltig;     /* 1 = d stimmt, 0 = neu bauen */
+        int passt;       /* Gewichte passen in 15 Bit */
+        unsigned long *d;
+    };
+
+    pf_kompakt pf_k[4] = { {0,0,0,0,0,0}, {0,0,0,0,0,0}, {0,0,0,0,0,0}, {0,0,0,0,0,0} };
+
+    inline unsigned long pf_k_wert(const map_pathfinding_info_tile &t, int &passt)
+    {
+        if(t.side_weight < 0 || t.side_weight > 32767 || t.diag_weight < 0 || t.diag_weight > 32767) passt = 0;
+
+        return ((unsigned long)(t.side_weight & 0x7FFF)) |
+               ((unsigned long)(t.diag_weight & 0x7FFF) << 15) |
+               (t.passable ? 0x80000000UL : 0UL);
+    }
+
+    void pf_k_alle_ungueltig()
+    {
+        for(int i = 0; i < 4; i++) pf_k[i].gueltig = 0;
+    }
+
+    void pf_k_freigeben()
+    {
+        for(int i = 0; i < 4; i++)
+        {
+            free(pf_k[i].d);
+            pf_k[i].d = 0;
+            pf_k[i].src = 0;
+            pf_k[i].gueltig = 0;
+        }
+    }
+
+    /* eine Kachel nachtragen, falls die Kopie gueltig ist */
+    void pf_k_kachel(map_pathfinding_info_tile **src, int x, int y)
+    {
+        for(int i = 0; i < 4; i++)
+            if(pf_k[i].src == src && pf_k[i].gueltig && pf_k[i].d)
+                pf_k[i].d[(size_t)x * pf_k[i].h + y] = pf_k_wert(src[x][y], pf_k[i].passt);
+    }
+
+    /* Kopie fuer src, oder 0 = alter Weg */
+    const unsigned long *pf_k_holen(map_pathfinding_info_tile **src, int w, int h)
+    {
+        if(!src || w <= 0 || h <= 0) return 0;
+
+        int frei = -1;
+
+        for(int i = 0; i < 4; i++)
+        {
+            pf_kompakt &k = pf_k[i];
+
+            if(k.src == src && k.w == w && k.h == h)
+            {
+                if(!k.gueltig)
+                {
+                    k.passt = 1;
+                    for(int x = 0; x < w; x++)
+                        for(int y = 0; y < h; y++)
+                            k.d[(size_t)x * h + y] = pf_k_wert(src[x][y], k.passt);
+                    k.gueltig = 1;
+                }
+
+                return k.passt ? k.d : 0;
+            }
+
+            if(frei < 0 && (!k.src || !k.gueltig)) frei = i;
+        }
+
+        if(frei < 0) frei = 0;
+
+        pf_kompakt &k = pf_k[frei];
+
+        free(k.d);
+        k.d = (unsigned long*)malloc((size_t)w * h * sizeof(unsigned long));
+        k.src = src;
+        k.w = w;
+        k.h = h;
+        k.gueltig = 0;
+
+        if(!k.d) { k.src = 0; return 0; }
+
+        k.passt = 1;
+        for(int x = 0; x < w; x++)
+            for(int y = 0; y < h; y++)
+                k.d[(size_t)x * h + y] = pf_k_wert(src[x][y], k.passt);
+        k.gueltig = 1;
+
+        return k.passt ? k.d : 0;
+    }
+}
 
 unsigned long zod_pf_belegungen = 0;
 
@@ -318,11 +430,15 @@ void ZPath_Finding_Engine::DeleteAllTileInfo()
     DeleteTileInfo(&path_robot_norocks_tile);
     DeleteTileInfo(&path_vehicle_tile);
     DeleteTileInfo(&path_vehicle_norocks_tile);
+
+    pf_k_freigeben();
 }
 
 void ZPath_Finding_Engine::AllocAllTileInfo()
 {
     int i, j;
+
+    pf_k_freigeben();
 
     //alloc
     path_vehicle_tile = (map_pathfinding_info_tile **)malloc(w * sizeof(map_pathfinding_info_tile *));
@@ -420,6 +536,8 @@ void ZPath_Finding_Engine::SetTileInfo(int x, int y, int tile_type)
 
     path_robot_norocks_tile[x][y].passable = path_robot_tile[x][y].passable;
     path_vehicle_norocks_tile[x][y].passable = path_vehicle_tile[x][y].passable;
+
+    pf_k_alle_ungueltig();
 }
 
 void ZPath_Finding_Engine::SetTileWideWeights()
@@ -495,6 +613,7 @@ void ZPath_Finding_Engine::SetTileWideWeights()
     free(wide_side_weight);
     free(wide_diag_weight);
 
+    pf_k_alle_ungueltig();
 }
 
 bool ZPath_Finding_Engine::TileOnMap(int tx, int ty)
@@ -571,6 +690,11 @@ void ZPath_Finding_Engine::SetImpassable(int x, int y, bool impassable, bool des
 
     path_robot_norocks_tile[x][y].passable = !impassable || destroyable;
     path_vehicle_norocks_tile[x][y].passable = !impassable || destroyable;
+
+    pf_k_kachel(path_robot_tile, x, y);
+    pf_k_kachel(path_vehicle_tile, x, y);
+    pf_k_kachel(path_robot_norocks_tile, x, y);
+    pf_k_kachel(path_vehicle_norocks_tile, x, y);
 
     //slow place for it
     //would be best placed after the point in which this is called
@@ -785,6 +909,8 @@ void ZPath_Finding_Engine::Kill_Thread_Id(int thread_id)
  *
  * JETZT wird auch INNERHALB einer Suche abgebrochen und im naechsten Takt
  * fortgesetzt. */
+namespace ZPath_Finding_AStar { extern int schnell_alt_erzwingen; }   /* weiter unten */
+
 void ZPath_Finding_Engine::ProcessJobs(double budget_seconds)
 {
     /* Budget je Bild, in Mikrosekunden ueber ZOD_PFBUDGET einstellbar.
@@ -833,6 +959,61 @@ void ZPath_Finding_Engine::ProcessJobs(double budget_seconds)
      * Do_Astar liest nur start/end/tile_info und schreibt pf_point_list --
      * ein zweiter Lauf ist also unbedenklich. */
     {
+        /* ZOD_PFFASTCHECK: alt gegen schnell, jede neue Suche am Stueck */
+        {
+            static int fc = -1;
+            static long fc_geprueft = 0, fc_ungleich = 0;
+
+            if(fc < 0)
+            {
+                char wahl[8];
+
+                fc = zod_env("ZOD_PFFASTCHECK", wahl, sizeof(wahl)) ? 1 : 0;
+
+                if(fc) ZLOG("ZOD_PFFASTCHECK ist AKTIV -- jede Wegsuche alt und schnell\n");
+            }
+
+            if(fc && !zod_pf_laufend && pending_list.size())
+            {
+                ZPath_Finding_Response *r = pending_list.front();
+
+                if(r && !r->kill_thread)
+                {
+                    r->pf_point_list.clear();
+                    ZPath_Finding_AStar::schnell_alt_erzwingen = 1;
+                    while(!ZPath_Finding_AStar::Do_Astar(r, start, 1e9)) { }
+                    ZPath_Finding_AStar::schnell_alt_erzwingen = 0;
+
+                    vector<pf_point> alt = r->pf_point_list;
+
+                    r->pf_point_list.clear();
+                    while(!ZPath_Finding_AStar::Do_Astar(r, start, 1e9)) { }
+
+                    bool gleich = (alt.size() == r->pf_point_list.size());
+
+                    for(size_t i = 0; gleich && i < alt.size(); i++)
+                        if(alt[i].x != r->pf_point_list[i].x || alt[i].y != r->pf_point_list[i].y) gleich = false;
+
+                    fc_geprueft++;
+
+                    if(!gleich)
+                    {
+                        fc_ungleich++;
+
+                        if(fc_ungleich <= 3)
+                            ZLOG("ZOD_PFFASTCHECK: UNGLEICH -- alt %ld Punkte, schnell %ld Punkte\n",
+                                 (long)alt.size(), (long)r->pf_point_list.size());
+                    }
+
+                    if((fc_geprueft % 50) == 0 || (!gleich && fc_ungleich <= 3))
+                        ZLOG("ZOD_PFFASTCHECK: %ld Suchen verglichen, %ld ungleich -- muss 0 sein\n",
+                             fc_geprueft, fc_ungleich);
+
+                    r->pf_point_list.clear();
+                }
+            }
+        }
+
         static int selbsttest = -1;
         static long geprueft = 0, ungleich = 0;
 
@@ -1224,9 +1405,55 @@ bool ZPath_Finding_Bresenham::GetNext(int &x, int &y)
 // =========================================================
 namespace ZPath_Finding_AStar
 {
+    /* kompakte Kacheln der laufenden Suche (0 = alter Weg), siehe pf_k_* */
+    const unsigned long *k_tab = 0;
+    int k_h = 0;
+
+    /* g der geschlossenen Knoten neben ihrem Index (gemeinsamer Block,
+     * Schritt 3: offen, geschlossen, g). add_to_open_list vergleicht dann
+     * ohne closed_list.list[i] -- die Liste waechst auf ~250 KB und wird
+     * dort kreuz und quer gelesen. 0 = alter Weg. */
+    int *g_block = 0;
+    int g_h = 0;
+    unsigned long g_abweichungen = 0;
+
+    inline int *g_platz(int x, int y) { return g_block + ((size_t)x * g_h + y) * 3 + 2; }
+    int k_pruefen = -1;
+    unsigned long k_abweichungen = 0, k_vergleiche = 0;
+
+    inline bool k_pass(map_pathfinding_info_tile **tile_info, int x, int y)
+    {
+        if(!k_tab) return tile_info[x][y].passable;
+
+        const bool v = (k_tab[(size_t)x * k_h + y] & 0x80000000UL) != 0;
+
+        if(k_pruefen > 0)
+        {
+            k_vergleiche++;
+            if(v != tile_info[x][y].passable) k_abweichungen++;
+        }
+
+        return v;
+    }
+
     int gf(int &cx, int &cy, int &nx, int &ny, ZPath_Finding_Response *response)
     {
         map_pathfinding_info_tile **tile_info = response->tile_info;
+
+        if(k_tab)
+        {
+            const unsigned long t = k_tab[(size_t)nx * k_h + ny];
+            const int v = ((cx == nx) || (cy == ny)) ? (int)(t & 0x7FFF) : (int)((t >> 15) & 0x7FFF);
+
+            if(k_pruefen > 0)
+            {
+                k_vergleiche++;
+                if(v != (((cx == nx) || (cy == ny)) ? tile_info[nx][ny].side_weight : tile_info[nx][ny].diag_weight))
+                    k_abweichungen++;
+            }
+
+            return v;
+        }
 
         if((cx == nx) || (cy == ny))
             return tile_info[nx][ny].side_weight;
@@ -1249,14 +1476,14 @@ namespace ZPath_Finding_AStar
             if(ex >= response->w) return false;
             if(ey >= response->h) return false;
 
-            if(!tile_info[ex][ey].passable) return false;
+            if(!k_pass(tile_info, ex, ey)) return false;
 
             //stop here if this is a side move
             if(ex == sx || ey == sy) return true;
 
             //do diag checks
-            if(!tile_info[sx+(ex-sx)][sy].passable) return false;
-            if(!tile_info[sx][sy+(ey-sy)].passable) return false;
+            if(!k_pass(tile_info, sx+(ex-sx), sy)) return false;
+            if(!k_pass(tile_info, sx, sy+(ey-sy))) return false;
         }
         else
         {
@@ -1265,10 +1492,10 @@ namespace ZPath_Finding_AStar
             if(ex+1 >= response->w) return false;
             if(ey+1 >= response->h) return false;
 
-            if(!tile_info[ex][ey].passable) return false;
-            if(!tile_info[ex+1][ey].passable) return false;
-            if(!tile_info[ex][ey+1].passable) return false;
-            if(!tile_info[ex+1][ey+1].passable) return false;
+            if(!k_pass(tile_info, ex, ey)) return false;
+            if(!k_pass(tile_info, ex+1, ey)) return false;
+            if(!k_pass(tile_info, ex, ey+1)) return false;
+            if(!k_pass(tile_info, ex+1, ey+1)) return false;
 
             //stop here if this is a side move
             if(ex == sx || ey == sy) return true;
@@ -1276,23 +1503,23 @@ namespace ZPath_Finding_AStar
             //what kind of diag is it?
             if(ex > sx && ey < sy) //upper right
             {
-                if(!tile_info[sx][sy-1].passable) return false;
-                if(!tile_info[sx+2][sy+1].passable) return false;
+                if(!k_pass(tile_info, sx, sy-1)) return false;
+                if(!k_pass(tile_info, sx+2, sy+1)) return false;
             }
             else if(ex < sx && ey < sy) //upper left
             {
-                if(!tile_info[sx+1][sy-1].passable) return false;
-                if(!tile_info[sx-1][sy+1].passable) return false;
+                if(!k_pass(tile_info, sx+1, sy-1)) return false;
+                if(!k_pass(tile_info, sx-1, sy+1)) return false;
             }
             else if(ex > sx && ey > sy) //lower right
             {
-                if(!tile_info[sx+2][sy].passable) return false;
-                if(!tile_info[sx][sy+2].passable) return false;
+                if(!k_pass(tile_info, sx+2, sy)) return false;
+                if(!k_pass(tile_info, sx, sy+2)) return false;
             }
             else //lower left
             {
-                if(!tile_info[sx-1][sy].passable) return false;
-                if(!tile_info[sx+1][sy+2].passable) return false;
+                if(!k_pass(tile_info, sx-1, sy)) return false;
+                if(!k_pass(tile_info, sx+1, sy+2)) return false;
             }
         }
         return true;
@@ -1307,7 +1534,7 @@ namespace ZPath_Finding_AStar
         if(!tile_ok(cp.x, cp.y, np.x, np.y, response)) return;
 
 
-        if(open_list.point_index[np.x][np.y] != -1) return;
+        if(open_list.IdxAt(np.x, np.y) != -1) return;
 
         /* Vorrangfehler behoben: "int i = ... != -1" wies i das
          * VERGLEICHSERGEBNIS zu (0 oder 1), nicht den Index. Die Verzweigung
@@ -1316,10 +1543,30 @@ namespace ZPath_Finding_AStar
          * und Vorgaenger dann ueberschrieben wurden. Das verfaelscht die
          * geschlossene Liste, kann die Wegrekonstruktion beschaedigen und
          * laesst die Suche mehr Knoten oeffnen als noetig. */
-        int i = closed_list.point_index[np.x][np.y];
+        int i = closed_list.IdxAt(np.x, np.y);
 
         if(i != -1)
         {
+            if(g_block)
+            {
+                int *gp = g_platz(np.x, np.y);
+
+                if(k_pruefen > 0 && *gp != closed_list.list[i].g) g_abweichungen++;
+
+                if(*gp > (gf(cp.x, cp.y, np.x, np.y, response) + cp.g))
+                {
+                    pf_point &ip = closed_list.list[i];
+
+                    ip.g = gf(cp.x, cp.y, np.x, np.y, response) + cp.g;
+                    ip.h = hf(np.x, np.y, end_x, end_y);
+                    ip.f = ip.g + ip.h;
+                    ip.px = cp.x;
+                    ip.py = cp.y;
+                    *gp = ip.g;
+                }
+                return;
+            }
+
             pf_point &ip = closed_list.list[i];
 
             if(ip.g > (gf(cp.x, cp.y, np.x, np.y, response) + cp.g))
@@ -1342,6 +1589,141 @@ namespace ZPath_Finding_AStar
 
         //debug_point("new on list", np);
         open_list.AddPoint(np);
+    }
+
+    /* ---- Warp F3 (18.11.2026): schnelle Nachbarschaft ------------------
+     *
+     * Gemessen ~25 us je Expansion auf dem 060/100 (2500 Takte) -- und das
+     * lag NICHT am Speicher (kompakte Kacheln und gemeinsamer Index brachten
+     * nichts), sondern an der Befehlszahl: je Nachbar ein Aufruf von
+     * add_to_open_list mit pf_point als Wert, darin tile_ok mit bis zu 15
+     * nicht eingebetteten k_pass-Aufrufen, gf zweimal, alles ueber
+     * Referenzen.
+     *
+     * Hier dasselbe in EINER eingebetteten Funktion je Nachbar, ueber die
+     * kompakte Kacheltabelle und den gemeinsamen Indexblock (offen,
+     * geschlossen, g). Reihenfolge, Pruefungen und Schreibvorgaenge genau wie
+     * add_to_open_list + tile_ok + gf + hf + AddPoint. Nur wenn k_tab,
+     * g_block und der Baum da sind, sonst der alte Weg.
+     *
+     * ZOD_PFFAST aus = alter Weg. ZOD_PFFASTCHECK = jede neue Suche erst alt,
+     * dann schnell am Stueck rechnen und die Wege vergleichen. */
+    int schnell_modus = -1;          /* 1 an, 0 aus */
+    int schnell_alt_erzwingen = 0;   /* Vergleich: diesmal den alten Weg */
+    unsigned long schnell_expansionen = 0;
+
+    enum { K_PASS = 0x80000000UL };
+
+    static inline __attribute__((always_inline))
+    void nachbar_schnell(const pf_point &cp, int nx, int ny, pf_point_array &open_list,
+                         pf_point_array &closed_list, const unsigned long *kt,
+                         int w, int h, bool robot, int end_x, int end_y)
+    {
+        const int sx = cp.x, sy = cp.y;
+
+        /* tile_ok */
+        if(robot)
+        {
+            if(nx < 0 || ny < 0 || nx >= w || ny >= h) return;
+            if(!(kt[nx * h + ny] & K_PASS)) return;
+
+            if(nx != sx && ny != sy)
+            {
+                if(!(kt[nx * h + sy] & K_PASS)) return;
+                if(!(kt[sx * h + ny] & K_PASS)) return;
+            }
+        }
+        else
+        {
+            if(nx < 0 || ny < 0 || nx + 1 >= w || ny + 1 >= h) return;
+
+            const unsigned long *t = kt + nx * h + ny;
+
+            if(!(t[0] & K_PASS)) return;
+            if(!(t[h] & K_PASS)) return;
+            if(!(t[1] & K_PASS)) return;
+            if(!(t[h + 1] & K_PASS)) return;
+
+            if(nx != sx && ny != sy)
+            {
+                if(nx > sx && ny < sy) //upper right
+                {
+                    if(!(kt[sx * h + (sy - 1)] & K_PASS)) return;
+                    if(!(kt[(sx + 2) * h + (sy + 1)] & K_PASS)) return;
+                }
+                else if(nx < sx && ny < sy) //upper left
+                {
+                    if(!(kt[(sx + 1) * h + (sy - 1)] & K_PASS)) return;
+                    if(!(kt[(sx - 1) * h + (sy + 1)] & K_PASS)) return;
+                }
+                else if(nx > sx && ny > sy) //lower right
+                {
+                    if(!(kt[(sx + 2) * h + sy] & K_PASS)) return;
+                    if(!(kt[sx * h + (sy + 2)] & K_PASS)) return;
+                }
+                else //lower left
+                {
+                    if(!(kt[(sx - 1) * h + sy] & K_PASS)) return;
+                    if(!(kt[(sx + 1) * h + (sy + 2)] & K_PASS)) return;
+                }
+            }
+        }
+
+        int *ix = g_block + (nx * h + ny) * 3;
+
+        if(ix[0] != -1) return;
+
+        const unsigned long kn = kt[nx * h + ny];
+        const int gw = (nx == sx || ny == sy) ? (int)(kn & 0x7FFF) : (int)((kn >> 15) & 0x7FFF);
+        const int ng = gw + cp.g;
+        const int i = ix[1];
+
+        if(i != -1)
+        {
+            if(ix[2] > ng)
+            {
+                pf_point &ip = closed_list.list[i];
+
+                ip.g = ng;
+                ip.h = abs(nx - end_x) + abs(ny - end_y);
+                ip.f = ip.g + ip.h;
+                ip.px = sx;
+                ip.py = sy;
+                ix[2] = ip.g;
+            }
+            return;
+        }
+
+        pf_point np(nx, ny);
+
+        np.g = ng;
+        np.h = abs(nx - end_x) + abs(ny - end_y);
+        np.f = np.g + np.h;
+        np.px = sx;
+        np.py = sy;
+
+        open_list.AddPoint(np);
+    }
+
+    static void nachbarn_schnell(const pf_point &cp, pf_point_array &open_list,
+                                 pf_point_array &closed_list, ZPath_Finding_Response *response)
+    {
+        const unsigned long *kt = k_tab;
+        const int w = response->w, h = response->h;
+        const bool robot = response->is_robot;
+        const int ex = response->end_x, ey = response->end_y;
+        const int x = cp.x, y = cp.y;
+
+        nachbar_schnell(cp, x-1, y-1, open_list, closed_list, kt, w, h, robot, ex, ey);
+        nachbar_schnell(cp, x-1, y,   open_list, closed_list, kt, w, h, robot, ex, ey);
+        nachbar_schnell(cp, x-1, y+1, open_list, closed_list, kt, w, h, robot, ex, ey);
+
+        nachbar_schnell(cp, x,   y-1, open_list, closed_list, kt, w, h, robot, ex, ey);
+        nachbar_schnell(cp, x,   y+1, open_list, closed_list, kt, w, h, robot, ex, ey);
+
+        nachbar_schnell(cp, x+1, y-1, open_list, closed_list, kt, w, h, robot, ex, ey);
+        nachbar_schnell(cp, x+1, y,   open_list, closed_list, kt, w, h, robot, ex, ey);
+        nachbar_schnell(cp, x+1, y+1, open_list, closed_list, kt, w, h, robot, ex, ey);
     }
     // ----------------------------------------------------
     void push_in_neighbors(pf_point &cp, pf_point_array &open_list,
@@ -1367,6 +1749,8 @@ namespace ZPath_Finding_AStar
     {
         open_list.RemovePoint(tp.x, tp.y);
         closed_list.AddPoint(tp);
+
+        if(g_block) *g_platz(tp.x, tp.y) = tp.g;
     }
     // ----------------------------------------------------
     /* Lineare Fassung -- bleibt als MASSSTAB fuer die Gegenprobe stehen.
@@ -1397,6 +1781,9 @@ namespace ZPath_Finding_AStar
      * ausgeschlossen. */
     unsigned long zod_pf_aufrufe = 0;
     unsigned long zod_pf_schritte = 0;
+    unsigned long zod_pf_linear_kaputt = 0;   /* Schluessel passte nicht -> linear */
+    unsigned long zod_pf_verglichen = 0;      /* ZOD_PFCHECK: Vergleiche */
+    unsigned long zod_pf_t_schleife = 0, zod_pf_t_rest = 0, zod_pf_expansionen = 0;
 
     pf_point lowest_f_cost(pf_point_array &open_list)
     {
@@ -1406,6 +1793,8 @@ namespace ZPath_Finding_AStar
 
         if(platz < 0)
         {
+            if(open_list.baum_an && open_list.baum_kaputt) zod_pf_linear_kaputt++;
+
             zod_pf_schritte += (unsigned long)open_list.size;
 
             return lowest_f_cost_linear(open_list);
@@ -1435,6 +1824,8 @@ namespace ZPath_Finding_AStar
         {
             const pf_point lin = lowest_f_cost_linear(open_list);
             const pf_point &b  = open_list.list[platz];
+
+            zod_pf_verglichen++;
 
             if(lin.x != b.x || lin.y != b.y || lin.f != b.f)
             {
@@ -1474,6 +1865,19 @@ namespace ZPath_Finding_AStar
 
         //check
         if(!response) return true;
+
+        if(k_pruefen < 0)
+        {
+            char wahl[8];
+
+            k_pruefen = zod_env("ZOD_PFTILECHECK", wahl, sizeof(wahl)) ? 1 : 0;
+
+            if(k_pruefen) ZLOG("ZOD_PFTILECHECK ist AKTIV -- kompakte Kacheln gegen das Original\n");
+        }
+
+        /* je Aufruf neu: zwischen zwei Aufrufen kann sich die Karte aendern */
+        k_tab = pf_k_holen(response->tile_info, response->w, response->h);
+        k_h = response->h;
 
         const bool fortsetzung = (a_response == response);
 
@@ -1541,6 +1945,38 @@ namespace ZPath_Finding_AStar
 
             zod_pf_suchen++;
 
+            /* Warp F3 (18.11.): EIN verschraenkter Indexblock fuer offene
+             * und geschlossene Liste (siehe pf_point_array::IdxAt). Faellt die
+             * Belegung aus, eigene Bloecke wie vorher. */
+            {
+                static int *gemeinsam = 0;
+                static size_t gemeinsam_n = 0;
+                const size_t n = (size_t)3 * response->w * response->h;
+
+                if(n > gemeinsam_n)
+                {
+                    free(gemeinsam);
+                    gemeinsam = (int*)malloc(n * sizeof(int));
+                    gemeinsam_n = gemeinsam ? n : 0;
+                    zod_pf_belegungen++;
+                }
+
+                if(gemeinsam)
+                {
+                    memset(gemeinsam, 0xFF, n * sizeof(int));
+                    open_list.IndexGemeinsam(gemeinsam, 3);
+                    closed_list.IndexGemeinsam(gemeinsam + 1, 3);
+                    g_block = gemeinsam;
+                    g_h = response->h;
+                }
+                else
+                {
+                    open_list.IndexEigen();
+                    closed_list.IndexEigen();
+                    g_block = 0;
+                }
+            }
+
             open_list.Wiederverwenden(response->w, response->h);
             closed_list.Wiederverwenden(response->w, response->h);
 
@@ -1552,7 +1988,25 @@ namespace ZPath_Finding_AStar
             a_end_x = end_x;     a_end_y = end_y;
         }
 
+        if(schnell_modus < 0)
+        {
+            char wahl[8];
+
+            schnell_modus = 1;
+
+            if(zod_env("ZOD_PFFAST", wahl, sizeof(wahl)) && !strcmp(wahl, "aus")) schnell_modus = 0;
+
+            ZLOG("Wegsuche: Nachbarschaft %s\n", schnell_modus ? "schnell (Vorgabe)" : "alt (ZOD_PFFAST aus)");
+        }
+
+        /* g-Kopie und Index muessen zu DIESER Suche gehoeren (g_h), die
+         * kompakte Tabelle zu ihren Kacheln; tile_ok liest sonst k_tab
+         * ohnehin genauso. k_pruefen vergleicht nur auf dem alten Weg. */
+        const bool schnell = schnell_modus > 0 && !schnell_alt_erzwingen && k_tab && g_block &&
+                             g_h == response->h && k_pruefen <= 0;
+
         total_ticks = 0;
+        const unsigned long pf_t0 = zod_fineclock_ticks();
         while(open_list.size)
         {
             cp = lowest_f_cost(open_list);
@@ -1577,7 +2031,13 @@ namespace ZPath_Finding_AStar
                 return true;
             }
 
-            push_in_neighbors(cp, open_list, closed_list, response);
+            if(schnell)
+            {
+                nachbarn_schnell(cp, open_list, closed_list, response);
+                schnell_expansionen++;
+            }
+            else
+                push_in_neighbors(cp, open_list, closed_list, response);
 
             //ZLOG("current_point:[%d,%d]\n", cp.x, cp.y);
 
@@ -1624,11 +2084,16 @@ namespace ZPath_Finding_AStar
                current_time() - start >= budget_seconds)
             {
                 a_cp = cp;
+                zod_pf_t_schleife += zod_fineclock_ticks() - pf_t0;
+                zod_pf_expansionen += (unsigned long)total_ticks;
 
                 return false;
             }
         }
         //end_time = current_time();
+        unsigned long pf_t1 = zod_fineclock_ticks();
+        zod_pf_t_schleife += pf_t1 - pf_t0;
+        zod_pf_expansionen += (unsigned long)total_ticks;
 
         vector<pf_point> final_path;
         if(cp.x == end_x && cp.y == end_y)
@@ -1670,7 +2135,7 @@ namespace ZPath_Finding_AStar
              * was die lineare Suche geliefert hat. */
             if(cp.px >= 0 && cp.px < closed_list.w
             && cp.py >= 0 && cp.py < closed_list.h)
-                i = closed_list.point_index[cp.px][cp.py];
+                i = closed_list.IdxAt(cp.px, cp.py);
             else
                 i = closed_list.size;
 
@@ -1731,6 +2196,7 @@ namespace ZPath_Finding_AStar
         final_path.push_back(pf_point(response->end_x, response->end_y));
 
         response->pf_point_list = final_path;
+        zod_pf_t_rest += zod_fineclock_ticks() - pf_t1;
         //return final_path;
 
         //ZLOG("Do_Astar::finished, ticks:%d time:%lf ... [%d,%d] to [%d,%d]\n", total_ticks, end_time - start_time, response->start_x, response->start_y, response->end_x, response->end_y);
@@ -1762,5 +2228,25 @@ extern "C" void zod_pf_report(void)
          (long)ZPath_Finding_AStar::zod_pf_schritte,
          (long)(ZPath_Finding_AStar::zod_pf_schritte /
                 ZPath_Finding_AStar::zod_pf_aufrufe));
+    {
+        const unsigned long f = zod_fineclock_freq() / 1000UL;
+
+        if(f)
+            ZLOG("  Wegsuche Zeit: Schleife %ld ms gesamt, Weg bauen %ld ms gesamt, %ld Expansionen (%ld ns je Expansion)\n",
+                 (long)(ZPath_Finding_AStar::zod_pf_t_schleife / f),
+                 (long)(ZPath_Finding_AStar::zod_pf_t_rest / f),
+                 (long)ZPath_Finding_AStar::zod_pf_expansionen,
+                 (long)(ZPath_Finding_AStar::zod_pf_expansionen >= 1000 ?
+                        (ZPath_Finding_AStar::zod_pf_t_schleife / f) * 1000UL / (ZPath_Finding_AStar::zod_pf_expansionen / 1000UL) : 0));
+    }
+    ZLOG("  Wegsuche schnell: %ld Expansionen\n", (long)ZPath_Finding_AStar::schnell_expansionen);
+    ZLOG("  Wegsuche Kacheln kompakt: ZOD_PFTILECHECK %ld Vergleiche, %ld Abweichungen, g-Kopie %ld Abweichungen -- muss 0 sein\n",
+         (long)ZPath_Finding_AStar::k_vergleiche, (long)ZPath_Finding_AStar::k_abweichungen,
+         (long)ZPath_Finding_AStar::g_abweichungen);
+    ZLOG("  Wegsuche Baum: %ld mal linear (Schluessel passte nicht); "
+         "ZOD_PFCHECK %ld Vergleiche, %ld Abweichungen -- muss 0 sein\n",
+         (long)ZPath_Finding_AStar::zod_pf_linear_kaputt,
+         (long)ZPath_Finding_AStar::zod_pf_verglichen,
+         (long)ZPath_Finding_AStar::zod_pf_abweichungen);
 }
 

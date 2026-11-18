@@ -329,6 +329,7 @@ class QZOD_DNCLIENTSERVERSHARED_EXPORT ZPlayer : public ZClient
 		bool objekt_anzahl_faellig;
 		void ProcessUnicode(int key);
 		void PlayBuildingSounds();
+		void PlayBuildingSoundsScan(vector<ZObject*> &liste, bool &do_play_radar, bool &do_play_robot, int &gebaeude);
 		void FocusCameraTo(int map_x, int map_y);
 		void ProcessFocusCamerato();
 		void FocusCameraToFort();

@@ -1317,6 +1317,13 @@ void ZSDL_Surface::SetSize(float size_)
 //Adresse bekommen und der Zwischenspeicher still ein altes Bild liefern.
 void ZSDL_Surface::DropRotoZoom()
 {
+	/* Warp F3 (18.11.): ohne Plaetze keine Eintraege und keine Anmeldung
+	 * (RotoRegister nur nach RotoSlots, Abmelden spaetestens hier) --
+	 * dann ist nichts zu tun. Gerufen wird das bei JEDER Fuellung und
+	 * jedem Blit auf eine Flaeche; RotoUnregister suchte jedes Mal die
+	 * ganze Besitzerliste ab. */
+	if(!roto_c) return;
+
 	RotoUnregister(this);
 
 	roto_entry *roto = RotoSlotsIfAny();
@@ -1389,6 +1396,25 @@ void ZSDL_Surface::FillRectOnToMe(SDL_Rect *dstrect, Uint8 r, Uint8 g, Uint8 b)
 	if(!sdl_surface) return;
 
 	SDL_FillRect(sdl_surface, dstrect, SDL_MapRGB(sdl_surface->format, r,g,b));
+
+	if(gl_texture_loaded)
+	{
+#ifndef DISABLE_OPENGL
+		glDeleteTextures(1, &gl_texture);
+#endif
+		gl_texture_loaded = false;
+	}
+
+	//unload rotozoom surface?
+	if(!use_opengl)
+		DropRotoZoom();
+}
+
+void ZSDL_Surface::FillRectOnToMeMapped(SDL_Rect *dstrect, Uint32 farbe)
+{
+	if(!sdl_surface) return;
+
+	SDL_FillRect(sdl_surface, dstrect, farbe);
 
 	if(gl_texture_loaded)
 	{

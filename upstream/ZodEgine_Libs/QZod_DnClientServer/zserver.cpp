@@ -2,7 +2,10 @@
 #include "fineclock.h"   /* feine Uhr -- current_time() loest hier 20 ms auf */
 #include "amiga_startup.h"   /* zod_env */
 #include <string.h>   /* memcmp: Merkfeld */
-extern "C" unsigned long zod_ps_ticks[8], zod_ps_n[8], zod_pe_scan_ticks, zod_pe_scan_n, zod_pe_rest_ticks;   /* zobject.cpp, Abschnitte */
+extern "C" unsigned long zod_ps_ticks[8], zod_ps_n[8], zod_pe_scan_ticks, zod_pe_scan_n, zod_pe_rest_ticks,
+	zod_pe_q_ticks, zod_pe_loop_ticks, zod_pe_ord_ticks, zod_pe_ord_n, zod_pe_ord_kand;
+extern "C" unsigned long zod_wp_ticks[16], zod_wp_n[16];
+extern "C" unsigned long zod_mv_ticks[4], zod_mv_n[4];   /* zobject.cpp, Abschnitte */
 
 /* --- Aufteilung des Postens `server` -------------------------------------
  *
@@ -176,8 +179,12 @@ static void zod_skip_auffrischen(vector<ZObject*> &l, ZOLists &ols)
 	zod_sk_neu++;
 }
 
+extern "C" void zod_bot_report(void);
+
 extern "C" void zod_server_sections_report(long frames)
 {
+	zod_bot_report();
+
 	if(zod_inert_mode == 2)
 		ZLOG("INERTCHECK: %ld geprueft, %ld Abweichungen\n",
 		     (long)zod_inert_geprueft, (long)zod_inert_falsch);
@@ -231,6 +238,26 @@ extern "C" void zod_server_sections_report(long frames)
 			     (long)((zod_pe_scan_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)),
 			     (long)(zod_pe_scan_n / zod_ot_bilder),
 			     (long)((zod_pe_rest_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)));
+			ZLOG("  davon Rasterabfrage %ld us, Schleife %ld us, Agro-Reihenfolge+Sichtlinie %ld us je Bild (%ld mal, %ld Kandidaten je Mal)\n",
+			     (long)((zod_pe_q_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)),
+			     (long)((zod_pe_loop_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)),
+			     (long)((zod_pe_ord_ticks / zod_ot_bilder) * 1000UL / (f / 1000UL)),
+			     (long)zod_pe_ord_n, (long)(zod_pe_ord_n ? zod_pe_ord_kand / zod_pe_ord_n : 0));
+			{
+				static const char *wn[10] = { "MOVE", "ENTER", "ATTACK", "FORCE_MOVE", "CRANE_REPAIR",
+					"UNIT_REPAIR", "AGRO", "ENTER_FORT", "DODGE", "PICKUP_GRENADES" };
+				for(int k = 0; k < 10; k++)
+					if(zod_wp_n[k])
+						ZLOG("  Wegpunkt %s: %ld us je Bild, %ld Aufrufe gesamt\n", wn[k],
+						     (long)((zod_wp_ticks[k] / zod_ot_bilder) * 1000UL / (f / 1000UL)), (long)zod_wp_n[k]);
+			}
+			{
+				static const char *mn[4] = { "neuer Wegpunkt", "CheckAttackTo", "ProcessMoveOrKillWP", "Rest" };
+				for(int k = 0; k < 4; k++)
+					if(zod_mv_n[k])
+						ZLOG("  MOVE_WP-Teil %s: %ld us je Bild, %ld Aufrufe gesamt (je Aufruf 13 us Uhr abziehen)\n", mn[k],
+						     (long)((zod_mv_ticks[k] / zod_ot_bilder) * 1000UL / (f / 1000UL)), (long)zod_mv_n[k]);
+			}
 			ZLOG("ProcessServer in Abschnitten (alle Objektarten):\n");
 			for(int k = 0; k < 7; k++)
 				if(zod_ps_n[k])

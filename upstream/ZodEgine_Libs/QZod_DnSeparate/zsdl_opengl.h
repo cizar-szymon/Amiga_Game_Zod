@@ -150,6 +150,9 @@ public:
 
 	void BlitOnToMe(SDL_Rect *srcrect, SDL_Rect *dstrect, SDL_Surface *src);
     void FillRectOnToMe(SDL_Rect *dstrect, Uint8 r, Uint8 g, Uint8 b);
+    /* Warp F3: wie FillRectOnToMe, aber mit schon umgerechneter Farbe
+     * (SDL_MapRGB einmal je Farbe statt je Rechteck, Minikarte) */
+    void FillRectOnToMeMapped(SDL_Rect *dstrect, Uint32 farbe);
 
 	bool WillRenderOnScreen(int x, int y, bool about_center);
 

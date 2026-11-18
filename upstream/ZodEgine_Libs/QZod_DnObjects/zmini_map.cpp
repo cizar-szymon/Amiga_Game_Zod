@@ -1,5 +1,10 @@
 #include "zmini_map.h"
 #include "fineclock.h"
+#include <amiga_startup.h>   /* zod_env */
+#include <string.h>
+
+static int zod_mm_pruefen = -1;   /* ZOD_MMCHECK, siehe unten */
+static unsigned long zod_mm_geprueft = 0, zod_mm_falsch = 0;
 
 ZMiniMap::ZMiniMap()
 {
@@ -106,6 +111,8 @@ bool ZMiniMap::ClickedMap(int x, int y, int &map_x, int &map_y)
 unsigned long zod_minimap_builds = 0;
 unsigned long zod_minimap_ticks  = 0;
 unsigned long zod_minimap_worst  = 0;
+unsigned long zod_minimap_t_fill = 0;
+unsigned long zod_minimap_t_sig = 0, zod_minimap_t_stat = 0, zod_minimap_t_blit = 0, zod_minimap_t_obj = 0, zod_minimap_n_obj = 0;
 unsigned long zod_minimap_static = 0;   /* wie oft die unbewegliche Flaeche neu entstand */
 
 extern "C" void zod_minimap_report(unsigned long *builds, unsigned long *ticks,
@@ -122,12 +129,39 @@ extern "C" void zod_minimap_report(unsigned long *builds, unsigned long *ticks,
 	 * wie bei zeichnen.Objektlisten -- eine Zeitangabe allein sagt nicht,
 	 * ob ein Filter greift. */
 	*statisch = zod_minimap_static;
+
+	if(zod_minimap_builds && *freq >= 1000)
+	{
+		const unsigned long b = zod_minimap_builds, f = *freq / 1000UL;
+
+		if(zod_mm_pruefen > 0)
+			ZLOG("ZOD_MMCHECK: %lu Aufbauten verglichen, %lu abweichend -- muss 0 sein\n", zod_mm_geprueft, zod_mm_falsch);
+
+		ZLOG("Minikarte je Aufbau: davon Fuellungen %ld us\n", (long)(((zod_minimap_t_fill / b) * 1000UL) / f));
+		ZLOG("Minikarte je Aufbau: Kennzahl %ld us, unbeweglich %ld us, Kopie %ld us, Objekte %ld us (%ld Objekte)\n",
+		     (long)(((zod_minimap_t_sig / b) * 1000UL) / f), (long)(((zod_minimap_t_stat / b) * 1000UL) / f),
+		     (long)(((zod_minimap_t_blit / b) * 1000UL) / f), (long)(((zod_minimap_t_obj / b) * 1000UL) / f),
+		     (long)(zod_minimap_n_obj / b));
+	}
 }
 
 /* Kennzahl ueber alles, was in der unbeweglichen Flaeche steckt. Absichtlich
  * BILLIG: nur eingebettete Zugriffe (GetObjectID, GetCords, GetOwner), keine
  * Fliesskommarechnung, keine Fuellung. Gegenueber rund 3,5 us je Objekt im
  * vollen Aufbau kostet das je Objekt einige Befehle. */
+/* Warp F3 (18.11.): die beweglichen Objekte in Listenreihenfolge, gesammelt
+ * im Durchlauf von StaticSignature -- ZeichneObjekte(false) laeuft dann ueber
+ * ~200 statt ueber alle ~4000 Objekte (dichte Schlacht: 8,4 ms je Aufbau).
+ * Zwischen beiden aendert sich object_list nicht (RebuildCache ruft beide
+ * direkt nacheinander). */
+static vector<ZObject*> &zod_mm_beweglich(void) { static vector<ZObject*> v; return v; }
+static int zod_mm_gesammelt = 0;
+
+/* ZOD_MMCHECK: nach jedem Aufbau den beweglichen Teil noch einmal auf dem
+ * alten Weg (alle Objekte, ZSDL_FillRect je Rechteck) zeichnen und die
+ * Flaeche Byte fuer Byte vergleichen. */
+static int zod_mm_alt = 0;             /* ZeichneObjekte auf dem alten Weg */
+
 unsigned long ZMiniMap::StaticSignature()
 {
 	unsigned long sig = (show_terrain != 0.) ? 1u : 2u;
@@ -139,13 +173,17 @@ unsigned long ZMiniMap::StaticSignature()
 	    i != zmap->GetZoneInfoList().end(); i++)
 		sig = sig * 31u + (unsigned long)i->owner;
 
+	vector<ZObject*> &bew = zod_mm_beweglich();
+
+	bew.clear();
+
 	for(vector<ZObject*>::iterator i = object_list->begin(); i != object_list->end(); i++)
 	{
 		unsigned char ot, oid;
 		int x, y;
 
 		(*i)->GetObjectID(ot, oid);
-		if(ot != MAP_ITEM_OBJECT) continue;
+		if(ot != MAP_ITEM_OBJECT) { bew.push_back(*i); continue; }
 
 		(*i)->GetCords(x, y);
 
@@ -153,6 +191,8 @@ unsigned long ZMiniMap::StaticSignature()
 		sig = sig * 31u + (unsigned long)x;
 		sig = sig * 31u + (unsigned long)y;
 	}
+
+	zod_mm_gesammelt = 1;
 
 	return sig;
 }
@@ -226,7 +266,36 @@ void ZMiniMap::RebuildStatic()
 
 void ZMiniMap::ZeichneObjekte(bool statisch, ZSDL_Surface *ziel)
 {
-	for(vector<ZObject*>::iterator i=object_list->begin(); i!=object_list->end(); i++)
+	/* Warp F3 (18.11.): Farbe je Mannschaft einmal je Aufruf umrechnen --
+	 * SDL_MapRGB ist fuer dieselbe Palette und dieselben r/g/b immer
+	 * derselbe Wert; vorher je Rechteck (ohne Zwischenspeicher bei eigener
+	 * Palette der Flaeche ~500 Vergleiche). */
+	Uint32 farbe[MAX_TEAM_TYPES];
+	bool farbe_da[MAX_TEAM_TYPES];
+	SDL_Surface *zs = ziel ? ziel->GetBaseSurface() : 0;
+
+	for(int t = 0; t < MAX_TEAM_TYPES; t++) farbe_da[t] = false;
+
+	vector<ZObject*> *liste = object_list;
+
+	if(zod_mm_alt) zs = 0;   /* alter Weg: ZSDL_FillRect je Rechteck */
+
+	if(!statisch)
+	{
+		if(zod_mm_gesammelt && !zod_mm_alt) liste = &zod_mm_beweglich();
+
+		zod_mm_gesammelt = 0;
+	}
+
+	/* Erst alle Rechtecke und Farben einsammeln, dann in derselben
+	 * Reihenfolge fuellen -- dasselbe Bild, und die Zeit der Fuellungen
+	 * laesst sich getrennt messen. */
+	struct mm_fuellung { SDL_Rect r; Uint32 c; };
+	static vector<mm_fuellung> fuell;
+
+	fuell.clear();
+
+	for(vector<ZObject*>::iterator i=liste->begin(); i!=liste->end(); i++)
 	{
 		SDL_Rect obj_rect;
 		int x, y, w, h;
@@ -254,17 +323,50 @@ void ZMiniMap::ZeichneObjekte(bool statisch, ZSDL_Surface *ziel)
 		int towner;
 		towner = (*i)->GetOwner();
 
-		ZSDL_FillRect(&obj_rect, team_color[towner].r, team_color[towner].g , team_color[towner].b, ziel);
+		if(zs && towner >= 0 && towner < MAX_TEAM_TYPES)
+		{
+			if(!farbe_da[towner])
+			{
+				farbe[towner] = SDL_MapRGB(zs->format, team_color[towner].r, team_color[towner].g, team_color[towner].b);
+				farbe_da[towner] = true;
+			}
+
+			mm_fuellung f;
+
+			f.r = obj_rect;
+			f.c = farbe[towner];
+			fuell.push_back(f);
+		}
+		else
+		{
+			/* alter Weg: erst die gesammelten, dann dieses (Reihenfolge) */
+			for(size_t k = 0; k < fuell.size(); k++) ziel->FillRectOnToMeMapped(&fuell[k].r, fuell[k].c);
+			fuell.clear();
+
+			ZSDL_FillRect(&obj_rect, team_color[towner].r, team_color[towner].g , team_color[towner].b, ziel);
+		}
+
+		if(!statisch) zod_minimap_n_obj++;
 	}
+
+	const unsigned long ft = statisch ? 0 : zod_fineclock_ticks();
+
+	for(size_t k = 0; k < fuell.size(); k++) ziel->FillRectOnToMeMapped(&fuell[k].r, fuell[k].c);
+
+	if(!statisch) zod_minimap_t_fill += zod_fineclock_ticks() - ft;
 }
 
 void ZMiniMap::RebuildCache()
 {
 	if(!cache.GetBaseSurface()) return;
 
+	unsigned long mt = zod_fineclock_ticks();
+
 	/* Unbewegliche Flaeche nur bei echter Aenderung neu aufbauen. */
 	{
 		const unsigned long sig = StaticSignature();
+
+		{ const unsigned long t = zod_fineclock_ticks(); zod_minimap_t_sig += t - mt; mt = t; }
 
 		SDL_Surface *sb = static_cache.GetBaseSurface();
 
@@ -285,10 +387,51 @@ void ZMiniMap::RebuildCache()
 			static_ready = true;
 			zod_minimap_static++;
 		}
+
+		{ const unsigned long t = zod_fineclock_ticks(); zod_minimap_t_stat += t - mt; mt = t; }
 	}
 
 	static_cache.BlitSurface(&cache, 0, 0);
+
+	{ const unsigned long t = zod_fineclock_ticks(); zod_minimap_t_blit += t - mt; mt = t; }
+
 	ZeichneObjekte(false, &cache);
+
+	zod_minimap_t_obj += zod_fineclock_ticks() - mt;
+
+	if(zod_mm_pruefen < 0)
+	{
+		char wahl[8];
+
+		zod_mm_pruefen = zod_env("ZOD_MMCHECK", wahl, sizeof(wahl)) ? 1 : 0;
+	}
+
+	if(zod_mm_pruefen)
+	{
+		SDL_Surface *cs = cache.GetBaseSurface();
+
+		if(cs && cs->pixels)
+		{
+			const size_t n = (size_t)cs->pitch * cs->h;
+			static vector<unsigned char> neu;
+
+			neu.assign((unsigned char*)cs->pixels, (unsigned char*)cs->pixels + n);
+
+			static_cache.BlitSurface(&cache, 0, 0);
+			zod_mm_alt = 1;
+			ZeichneObjekte(false, &cache);
+			zod_mm_alt = 0;
+
+			zod_mm_geprueft++;
+
+			if(memcmp(&neu[0], cs->pixels, n))
+			{
+				zod_mm_falsch++;
+
+				if(zod_mm_falsch <= 3) ZLOG("ZOD_MMCHECK: Minikarte weicht ab (Aufbau %lu)\n", zod_mm_geprueft);
+			}
+		}
+	}
 }
 
 void ZMiniMap::DoRender(SDL_Surface *dest, int x, int y)

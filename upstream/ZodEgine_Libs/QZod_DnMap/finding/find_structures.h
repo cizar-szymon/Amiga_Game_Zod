@@ -61,7 +61,24 @@ public:
         baum = nullptr;
         baum_blaetter = 0;
         baum_an = 0;
+        baum_kaputt = 0;
+        pi = nullptr;
+        pi_stride = 1;
+        pi_ext = 0;
     }
+
+    /* Warp F3 (18.11.2026): Koordinatenindex ueber IdxAt(x, y). Offene und
+     * geschlossene Liste koennen sich EINEN Block teilen (IndexGemeinsam,
+     * verschraenkt: Schritt 2) -- beide Nachschlagen derselben Kachel in
+     * add_to_open_list liegen dann in derselben Cachezeile. Auf dem Warp
+     * ist jeder Fehlgriff an L2 vorbei 600-800 ns. */
+    inline int &IdxAt(int x, int y) { return pi[((size_t)x * h + y) * (size_t)pi_stride]; }
+
+    /* Index aus einem fremden Block (der Aufrufer belegt und setzt -1) */
+    inline void IndexGemeinsam(int *block, int stride) { pi = block; pi_stride = stride; pi_ext = 1; }
+
+    /* zurueck zum eigenen Block (Wiederverwenden legt ihn an) */
+    inline void IndexEigen() { pi_ext = 0; pi = pi_block; pi_stride = 1; }
 
     /* ------------------------------------------------------------------
      * TURNIERBAUM UEBER DIE FELDPLAETZE
@@ -86,18 +103,28 @@ public:
      * nie nach dem Kleinsten gefragt, und sie aendert f an Ort und Stelle
      * (Kostenverbesserung eines geschlossenen Knotens) -- ein Baum darueber
      * wuerde still veralten. */
-    inline int BaumF(int platz) const { return list[platz].f; }
+    /* Warp F3 (18.11.2026): der Baum haelt SCHLUESSEL statt Feldplaetze.
+     *
+     * Schluessel = f * 65536 + Platz, als vorzeichenloses Langwort; leer =
+     * BAUM_LEER (groesser als jeder Schluessel). Der kleinste Schluessel ist
+     * genau das kleinste (f, Platz) -- dieselbe Regel wie vorher, nur ohne
+     * den Umweg ueber list[platz].f (zwei verstreute Lesezugriffe je
+     * Vergleich, auf dem 060 meist Cache-Fehlgriffe). Weil der Knoten jetzt
+     * seinen WERT traegt, ist auch der Abbruch beim unveraenderten Knoten
+     * richtig (siehe BaumSetze).
+     *
+     * Passt ein Wert nicht (f ausserhalb 0..65534 oder Platz > 65535), wird
+     * der Baum fuer den Rest der Suche abgeschaltet (baum_kaputt) und
+     * lowest_f_cost nimmt die lineare Suche -- die das Ergebnis definiert. */
+    enum { BAUM_LEER = 0xFFFFFFFFUL };
 
-    inline int BaumBesser(int a, int b) const
+    inline unsigned long BaumSchluessel(int platz)
     {
-        if(a < 0) return b;
-        if(b < 0) return a;
+        const int f = list[platz].f;
 
-        const int fa = BaumF(a), fb = BaumF(b);
+        if(f < 0 || f > 65534 || platz > 65535) { baum_kaputt = 1; return BAUM_LEER; }
 
-        if(fa != fb) return (fa < fb) ? a : b;
-
-        return (a < b) ? a : b;   /* Gleichstand: kleinster Platz gewinnt */
+        return ((unsigned long)f << 16) | (unsigned long)platz;
     }
 
     /* Kapazitaet sicherstellen -- belegt NUR, wenn der Baum zu klein ist.
@@ -115,7 +142,7 @@ public:
 
         free(baum);
         baum_blaetter = n;
-        baum = (int*)malloc((size_t)2 * n * sizeof(int));
+        baum = (unsigned long*)malloc((size_t)2 * n * sizeof(unsigned long));
 
         if(!baum) { baum_blaetter = 0; baum_an = 0; }
     }
@@ -128,12 +155,18 @@ public:
 
         const int n = baum_blaetter;
 
-        for(int i = 0; i < 2 * n; i++) baum[i] = -1;
+        baum_kaputt = 0;
 
-        for(int i = 0; i < size; i++) baum[n + i] = i;
+        for(int i = 0; i < 2 * n; i++) baum[i] = BAUM_LEER;
+
+        for(int i = 0; i < size; i++) baum[n + i] = BaumSchluessel(i);
 
         for(int i = n - 1; i >= 1; i--)
-            baum[i] = BaumBesser(baum[2*i], baum[2*i+1]);
+        {
+            const unsigned long a = baum[2*i], b = baum[2*i+1];
+
+            baum[i] = a < b ? a : b;
+        }
     }
 
     inline void BaumSetze(int platz, int belegt)
@@ -142,26 +175,33 @@ public:
 
         int i = baum_blaetter + platz;
 
-        baum[i] = belegt ? platz : -1;
+        baum[i] = belegt ? BaumSchluessel(platz) : (unsigned long)BAUM_LEER;
 
-        /* KEIN vorzeitiger Abbruch bei unveraendertem Sieger.
-         *
-         * Das waere der uebliche Kniff, hier aber falsch: In RemovePoint
-         * behaelt der nachgerueckte Punkt seinen PLATZ, bekommt aber ein
-         * anderes f. Der Sieger eines Knotens kann derselbe Platz bleiben,
-         * waehrend sich sein Wert aendert -- und dann kippt weiter oben
-         * sehr wohl noch etwas. Der Baum liefe still falsch, und zwar nur
-         * manchmal. Der Weg bis zur Wurzel sind rund zehn Schritte. */
+        /* Vorzeitiger Abbruch, sobald ein Knoten seinen Wert behaelt: die
+         * Knoten tragen jetzt den SCHLUESSEL (f und Platz), nicht nur den
+         * Platz. Frueher war das falsch -- der nachgerueckte Punkt in
+         * RemovePoint behielt seinen Platz bei anderem f, der Knoten sah
+         * gleich aus und war es nicht. Ein gleicher Schluessel heisst jetzt
+         * gleiches f UND gleicher Platz, also aendert sich darueber nichts. */
         for(i >>= 1; i >= 1; i >>= 1)
-            baum[i] = BaumBesser(baum[2*i], baum[2*i+1]);
+        {
+            const unsigned long a = baum[2*i], b = baum[2*i+1];
+            const unsigned long m = a < b ? a : b;
+
+            if(baum[i] == m) break;
+
+            baum[i] = m;
+        }
     }
 
     /* Platz des kleinsten (f, Platz), oder -1 wenn leer. */
     inline int BaumKleinster() const
     {
-        if(!baum_an || !baum) return -1;
+        if(!baum_an || !baum || baum_kaputt) return -1;
 
-        return baum[1];
+        if(baum[1] == (unsigned long)BAUM_LEER) return -1;
+
+        return (int)(baum[1] & 0xFFFFUL);
     }
 
     inline void BaumEin()
@@ -190,13 +230,24 @@ public:
      * bedeutet. */
     inline void Wiederverwenden(int w_, int h_)
     {
-        if(w != w_ || h != h_ || !point_index || !pi_block)
+        if(pi_ext)
         {
-            FreePointIndex();
-            InitPointIndex(w_, h_);
+            w = w_;
+            h = h_;
         }
         else
-            memset(pi_block, 0xFF, (size_t)w * h * sizeof(int));
+        {
+            if(w != w_ || h != h_ || !point_index || !pi_block)
+            {
+                FreePointIndex();
+                InitPointIndex(w_, h_);
+            }
+            else
+                memset(pi_block, 0xFF, (size_t)w * h * sizeof(int));
+
+            pi = pi_block;
+            pi_stride = 1;
+        }
 
         if(!list)
         {
@@ -263,6 +314,7 @@ public:
         baum = nullptr;
         baum_blaetter = 0;
         baum_an = 0;
+        baum_kaputt = 0;
     }
 
     inline void AddPoint(pf_point &np)
@@ -278,7 +330,7 @@ public:
         }
 
         list[size] = np;
-        point_index[np.x][np.y] = size;
+        IdxAt(np.x, np.y) = size;
 
         size++;
 
@@ -294,16 +346,16 @@ public:
 
     inline void RemovePoint(int x, int y)
     {
-        int i = point_index[x][y];
+        int i = IdxAt(x, y);
 
         if(i != -1)
         {
-            point_index[x][y] = -1;
+            IdxAt(x, y) = -1;
 
             size--;
             list[i] = list[size];
 
-            point_index[list[i].x][list[i].y] = i;
+            IdxAt(list[i].x, list[i].y) = i;
 
             /* Reihenfolge wichtig: erst den frei gewordenen LETZTEN Platz
              * leeren, dann den nachgerueckten Punkt eintragen. Bei i == size
@@ -318,13 +370,17 @@ public:
     pf_point* list;
     int **point_index;
     int *pi_block;     /* ein Block fuer alle Spalten, wiederverwendet */
+    int *pi;           /* benutzter Index: pi_block oder gemeinsamer Block */
+    int pi_stride;     /* 1 = eigener Block, 2 = mit der anderen Liste verschraenkt */
+    int pi_ext;        /* 1 = gemeinsamer Block (IndexGemeinsam) */
     int w, h;
     int size;
     int alloc_size;
 
-    int *baum;           /* Turnierbaum, 2*baum_blaetter Eintraege */
+    unsigned long *baum; /* Turnierbaum, 2*baum_blaetter Schluessel */
     int baum_blaetter;   /* auf Zweierpotenz aufgerundet */
     int baum_an;
+    int baum_kaputt;     /* ein Wert passte nicht in den Schluessel -> linear */
 };
 
 

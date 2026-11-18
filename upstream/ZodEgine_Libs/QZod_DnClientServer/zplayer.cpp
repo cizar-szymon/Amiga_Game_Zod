@@ -2254,10 +2254,59 @@ static inline bool zod_sortcache_gueltig(const zod_sortcache &c, const vector<ZO
 	       (l.empty() || memcmp(&c.ptr[0], &l[0], l.size() * sizeof(ZObject*)) == 0);
 }
 
+/* Warp F3 (18.11.): Zeit je Liste in Teilen: 0 Neuaufbau, 1 Schluessel
+ * auffrischen, 2 Einfuegesortierung, 3 Rueckkopie; Summe, Maximum,
+ * Verschiebungen (Elemente, die in der Sortierung wandern). */
+static unsigned long zod_sp_geprueft = 0, zod_sp_falsch = 0; static unsigned long zod_st_t[4][4], zod_st_max[4][4], zod_st_n[4], zod_st_schub[4], zod_st_len[4];
+
+extern "C" void zod_sortteile_report(void)
+{
+	const unsigned long f = zod_fineclock_freq() / 1000UL;
+	static const char *tn[4] = { "Neuaufbau", "Schluessel", "Sortieren", "Rueckkopie" };
+
+	if(!f) return;
+
+	if(zod_sp_geprueft)
+		ZLOG("Sortierung Pruefung: %lu Laeufe gegen stable_sort, %lu abweichend -- muss 0 sein\n",
+		     zod_sp_geprueft, zod_sp_falsch);
+
+	for(int k = 0; k < 4; k++)
+	{
+		if(!zod_st_n[k]) continue;
+
+		ZLOG("Sortierliste %d: %lu Laeufe, %lu Eintraege im Mittel, %lu Verschiebungen je Lauf\n", k,
+		     zod_st_n[k], zod_st_len[k] / zod_st_n[k], zod_st_schub[k] / zod_st_n[k]);
+
+		for(int t = 0; t < 4; t++)
+			ZLOG("  %s: im Mittel %lu us, laengstes %lu us\n", tn[t],
+			     (zod_st_t[k][t] / zod_st_n[k]) * 1000UL / f, zod_st_max[k][t] * 1000UL / f);
+	}
+}
+
+
+static bool zod_sp_kleiner(const pair<int, ZObject*> &a, const pair<int, ZObject*> &b) { return a.first < b.first; }
+
+static inline void zod_st_zeit(int k, int t, unsigned long &u)
+{
+	if(!zod_time_measure) return;   /* nur im Messbetrieb (13 us je Uhrablesung) */
+
+	const unsigned long jetzt = zod_fineclock_ticks();
+
+	zod_st_t[k][t] += jetzt - u;
+	if(jetzt - u > zod_st_max[k][t]) zod_st_max[k][t] = jetzt - u;
+	u = jetzt;
+}
+
 static void zod_sort_liste(vector<ZObject*> &l, zod_sortcache &c, const void *besitzer,
                            unsigned long version)
 {
 	const size_t n = l.size();
+	const int sk = (&c == &zod_sc[0]) ? 0 : (&c == &zod_sc[1]) ? 1 : (&c == &zod_sc[2]) ? 2 : 3;
+	unsigned long su = zod_time_measure ? zod_fineclock_ticks() : 0;
+	unsigned long schub = 0;
+
+	zod_st_n[sk]++;
+	zod_st_len[sk] += (unsigned long)n;
 
 	if(!zod_sortcache_gueltig(c, l, besitzer, version))
 	{
@@ -2287,6 +2336,7 @@ static void zod_sort_liste(vector<ZObject*> &l, zod_sortcache &c, const void *be
 		}
 
 		zod_sort_neu++;
+		zod_st_zeit(sk, 0, su);
 	}
 	else
 	{
@@ -2305,6 +2355,7 @@ static void zod_sort_liste(vector<ZObject*> &l, zod_sortcache &c, const void *be
 		}
 
 		zod_sort_gemerkt++;
+		zod_st_zeit(sk, 1, su);
 	}
 
 	/* dieselbe Einfuegesortierung wie sort_objects_func: a vor b, wenn a < b */
@@ -2313,16 +2364,37 @@ static void zod_sort_liste(vector<ZObject*> &l, zod_sortcache &c, const void *be
 	int *xx = n ? &c.xs[0] : 0;
 	unsigned char *aa = n ? &c.art[0] : 0;
 
+	/* Warp F3 (18.11.): steht ein Element schon richtig (k >= Vorgaenger),
+	 * fuehrt die Schleife unten zu vier Selbstzuweisungen -- die werden
+	 * uebersprungen. `vorher` ist der letzte (groesste) Schluessel des schon
+	 * sortierten Anfangs; nach einem Einfuegen bleibt er derselbe. Gemessen
+	 * vorher ~0,7 us je Element (vier Lese- und vier Schreibzugriffe), bei
+	 * nur 371 Verschiebungen auf ~1100 Elemente. */
+	int vorher = n ? kk[0] : 0;
+
+	/* ZOD_SORTCACHE 2: Eingang merken, nachher gegen stable_sort pruefen */
+	static vector<pair<int, ZObject*> > sp_ein;
+
+	if(zod_sort_modus == 2)
+	{
+		sp_ein.clear();
+		for(size_t i = 0; i < n; i++) sp_ein.push_back(pair<int, ZObject*>(kk[i], pp[i]));
+	}
+
 	for(size_t i = 1; i < n; i++)
 	{
-		ZObject *po = pp[i];
 		const int k = kk[i];
+
+		if(k >= vorher) { vorher = k; continue; }
+
+		ZObject *po = pp[i];
 		const int xv = xx[i];
 		const unsigned char a = aa[i];
 		size_t j = i;
 
 		while(j > 0 && k < kk[j - 1])
 		{
+			schub++;
 			pp[j] = pp[j - 1];
 			kk[j] = kk[j - 1];
 			xx[j] = xx[j - 1];
@@ -2336,15 +2408,44 @@ static void zod_sort_liste(vector<ZObject*> &l, zod_sortcache &c, const void *be
 		aa[j] = a;
 	}
 
-	if(n) memcpy(&l[0], pp, n * sizeof(ZObject*));
+	zod_st_zeit(sk, 2, su);
+	zod_st_schub[sk] += schub;
+
+	if(zod_sort_modus == 2)
+	{
+		std::stable_sort(sp_ein.begin(), sp_ein.end(), zod_sp_kleiner);
+
+		bool gleich = true;
+
+		for(size_t i = 0; i < n; i++)
+			if(sp_ein[i].second != pp[i] || sp_ein[i].first != kk[i]) { gleich = false; break; }
+
+		zod_sp_geprueft++;
+		if(!gleich) zod_sp_falsch++;
+
+		if(zod_time_measure) su = zod_fineclock_ticks();   /* Pruefung nicht in die Zeiten */
+	}
+
+	/* c.ptr war vor dem Sortieren gleich l (gueltig: memcmp; neu: c.ptr = l)
+	 * -- ohne Verschiebung ist l also schon richtig */
+	if(n && schub) memcpy(&l[0], pp, n * sizeof(ZObject*));
+
+	zod_st_zeit(sk, 3, su);
 
 	c.besitzer = besitzer;
 	c.version = version;
 }
 
+extern "C" void zod_klang_report(void);
+extern "C" void zod_mop_report(void);
+
 extern "C" void zod_sortcache_report(void)
 {
 	if(zod_sort_modus <= 0) return;
+
+	zod_sortteile_report();
+	zod_klang_report();
+	zod_mop_report();
 
 	ZLOG("Sortierspeicher: %lu mal neu aufgebaut, %lu mal benutzt, %lu falsche Schluessel, %lu Process-Aufrufe gespart\n",
 	     zod_sort_neu, zod_sort_gemerkt, zod_sort_falsch, zod_sort_process_aus);
@@ -2699,13 +2800,69 @@ void ZPlayer::ProcessVerbalWarnings()
 	}
 }
 
+/* Warp F3 (18.11.): PlayBuildingSounds lief JEDES Bild ueber die ganze
+ * object_list (~4000 Objekte, fast nur Steine), um ~10 Gebaeude zu finden.
+ * Gesucht sind nur zwei Oder-Merker -- die Reihenfolge ist gleichgueltig,
+ * es genuegt also ols.building_olist. ZOD_KLANGCHECK 1 rechnet die volle
+ * Schleife daneben und vergleicht Merker und Gebaeudezahl. */
+static unsigned long zod_klang_geprueft = 0, zod_klang_falsch = 0;
+
+extern "C" void zod_klang_report(void)
+{
+	if(zod_klang_geprueft)
+		ZLOG("ZOD_KLANGCHECK: %lu Bilder verglichen, %lu abweichend -- muss 0 sein\n",
+		     zod_klang_geprueft, zod_klang_falsch);
+}
+
 void ZPlayer::PlayBuildingSounds()
 {
-	bool do_play_radar = false;
-	bool do_play_robot = false;
-	bool do_play_vehicle = false;
+	static int pruefen = -1;
 
-	for(vector<ZObject*>::iterator i=object_list.begin(); i!=object_list.end(); i++)
+	if(pruefen < 0)
+	{
+		char wahl[8];
+
+		pruefen = zod_env("ZOD_KLANGCHECK", wahl, sizeof(wahl)) ? 1 : 0;
+	}
+
+	bool radar = false, robot = false;
+	int gebaeude = 0;
+
+	PlayBuildingSoundsScan(ols.building_olist, radar, robot, gebaeude);
+
+	if(pruefen)
+	{
+		bool r2 = false, b2 = false;
+		int g2 = 0;
+
+		PlayBuildingSoundsScan(object_list, r2, b2, g2);
+		zod_klang_geprueft++;
+
+		if(r2 != radar || b2 != robot || g2 != gebaeude)
+		{
+			if(zod_klang_falsch < 5)
+				ZLOG("ZOD_KLANGCHECK: Liste %d Gebaeude, voll %d\n", gebaeude, g2);
+			zod_klang_falsch++;
+		}
+
+		radar = r2;
+		robot = b2;
+	}
+
+	if(radar)
+		ZSoundEngine::RepeatWav(RADAR_SND);
+	else
+		ZSoundEngine::StopRepeatWav(RADAR_SND);
+
+	if(robot)
+		ZSoundEngine::RepeatWav(ROBOT_FACTORY_SND);
+	else
+		ZSoundEngine::StopRepeatWav(ROBOT_FACTORY_SND);
+}
+
+void ZPlayer::PlayBuildingSoundsScan(vector<ZObject*> &liste, bool &do_play_radar, bool &do_play_robot, int &gebaeude)
+{
+	for(vector<ZObject*>::iterator i=liste.begin(); i!=liste.end(); i++)
 	{
 		unsigned char ot, oid;
 		int x, y, w, h;
@@ -2713,6 +2870,9 @@ void ZPlayer::PlayBuildingSounds()
 		(*i)->GetObjectID(ot, oid);
 
 		if(ot != BUILDING_OBJECT) continue;
+
+		gebaeude++;
+
 		if((*i)->IsDestroyed()) continue;
 
 		//radar
@@ -2739,23 +2899,28 @@ void ZPlayer::PlayBuildingSounds()
 		//vehicle factory
 
 	}
-
-	if(do_play_radar)
-		ZSoundEngine::RepeatWav(RADAR_SND);
-	else
-		ZSoundEngine::StopRepeatWav(RADAR_SND);
-
-	if(do_play_robot)
-		ZSoundEngine::RepeatWav(ROBOT_FACTORY_SND);
-	else
-		ZSoundEngine::StopRepeatWav(ROBOT_FACTORY_SND);
 }
 
-void ZPlayer::MissileObjectParticles(int x_, int y_, int radius, int particles)
-{
-	radius *= 0.8;
+/* Warp F3 (18.11.): lief je Einschlag ueber die ganze object_list (~4000,
+ * fast nur Steine) und suchte Geschuetze, Fahrzeuge, Roboter. Genau die
+ * stehen -- in derselben Reihenfolge, AddObject haengt beide hinten an --
+ * in ols.passive_engagable_olist. Die Reihenfolge zaehlt hier (rand()),
+ * deshalb erst die Treffer sammeln, dann wuerfeln; ZOD_KLANGCHECK 1
+ * sammelt zusaetzlich aus der vollen Liste und vergleicht die Folgen. */
+static unsigned long zod_mop_geprueft = 0, zod_mop_falsch = 0;
 
-	for(vector<ZObject*>::iterator i=object_list.begin(); i!=object_list.end(); i++)
+extern "C" void zod_mop_report(void)
+{
+	if(zod_mop_geprueft)
+		ZLOG("ZOD_KLANGCHECK Einschlaege: %lu verglichen, %lu abweichend -- muss 0 sein\n",
+		     zod_mop_geprueft, zod_mop_falsch);
+}
+
+static void zod_mop_treffer(vector<ZObject*> &liste, int x_, int y_, int radius, vector<ZObject*> &treffer)
+{
+	treffer.clear();
+
+	for(vector<ZObject*>::iterator i=liste.begin(); i!=liste.end(); i++)
 	{
 		unsigned char ot, oid;
 		int ox, oy;
@@ -2768,20 +2933,49 @@ void ZPlayer::MissileObjectParticles(int x_, int y_, int radius, int particles)
 		(*i)->GetCords(ox, oy);
 		(*i)->GetDimensionsPixel(w, h);
 
-		//if(obj.loc.x > x + width_pix) return false;
-		//if(obj.loc.x + obj.width_pix < x) return false;
-		//if(obj.loc.y > y + height_pix) return false;
-		//if(obj.loc.y + obj.height_pix < y) return false;
-
 		if(ox > x_ + radius) continue;
 		if(ox + w < x_ - radius) continue;
 		if(oy > y_ + radius) continue;
 		if(oy + h < y_ - radius) continue;
 
-		//if(ox + w > x_ - radius) continue;
-		//if(oy + h > y_ - radius) continue;
-		//if(ox < x_ + radius) continue;
-		//if(oy < y_ + radius) continue;
+		treffer.push_back(*i);
+	}
+}
+
+void ZPlayer::MissileObjectParticles(int x_, int y_, int radius, int particles)
+{
+	radius *= 0.8;
+
+	static int pruefen = -1;
+	static vector<ZObject*> treffer, voll;
+
+	if(pruefen < 0)
+	{
+		char wahl[8];
+
+		pruefen = zod_env("ZOD_KLANGCHECK", wahl, sizeof(wahl)) ? 1 : 0;
+	}
+
+	zod_mop_treffer(ols.passive_engagable_olist, x_, y_, radius, treffer);
+
+	if(pruefen)
+	{
+		zod_mop_treffer(object_list, x_, y_, radius, voll);
+		zod_mop_geprueft++;
+		if(voll != treffer) zod_mop_falsch++;
+		treffer.swap(voll);
+	}
+
+	for(size_t k = 0; k < treffer.size(); k++)
+	{
+		ZObject *o = treffer[k];
+		unsigned char ot, oid;
+		int ox, oy;
+		int w, h;
+
+		o->GetObjectID(ot, oid);
+		o->GetCords(ox, oy);
+		o->GetDimensionsPixel(w, h);
 
 		int particle_amount = 14 + (rand() % particles);
 

@@ -1,4 +1,32 @@
 #include "zbot.h"
+#include "fineclock.h"
+
+/* Warp F3 (18.11.): Zeit der Bot-Befehlsrunde (Stage1AI_3) in Teilen:
+ * 0 Sammeln, 1 MatchTargets_3, 2 GiveOutOrders_3; [3] = ganze Runde.
+ * Summe und laengste. Vier Uhrablesungen je Runde (1 Hz je Bot). */
+static unsigned long zod_bot_t[4], zod_bot_max[4], zod_bot_n = 0;
+
+extern "C" void zod_bot_report(void)
+{
+	const unsigned long f = zod_fineclock_freq() / 1000UL;
+	static const char *nm[4] = { "Sammeln", "MatchTargets_3", "GiveOutOrders_3", "Runde gesamt" };
+
+	if(!zod_bot_n || !f) return;
+
+	ZLOG("Bot-Befehlsrunden: %lu\n", zod_bot_n);
+	for(int k = 0; k < 4; k++)
+		ZLOG("  Bot %s: im Mittel %lu us, laengste %lu us\n", nm[k],
+		     (zod_bot_t[k] / zod_bot_n) * 1000UL / f, zod_bot_max[k] * 1000UL / f);
+}
+
+static inline void zod_bot_zeit(int k, unsigned long &t)
+{
+	const unsigned long n = zod_fineclock_ticks();
+
+	zod_bot_t[k] += n - t;
+	if(n - t > zod_bot_max[k]) zod_bot_max[k] = n - t;
+	t = n;
+}
 
 using namespace COMMON;
 
@@ -149,6 +177,11 @@ bool ZBot::Stage1AI_3()
 	//ordering too fast?
 	if(the_time < last_order_time + order_delay) return true;
 
+	const unsigned long bt0 = zod_fineclock_ticks();
+	unsigned long bt = bt0;
+
+	zod_bot_n++;
+
 	//collect our units
 	CollectOurUnits_3(units_list, targeted_list);
 
@@ -162,11 +195,17 @@ bool ZBot::Stage1AI_3()
 	targets_orig_list = targets_list;
 	RemoveTargetedFromTargets(targets_list, targeted_list);
 
+	zod_bot_zeit(0, bt);
+
 	//match targets to units
 	MatchTargets_3(units_list, targets_list);
 
+	zod_bot_zeit(1, bt);
+
 	//give out orders
 	GiveOutOrders_3(units_list, targets_list);
+
+	zod_bot_zeit(2, bt);
 
 	//did not some units not get orders because some targets were removed?
 	if(units_list.size() && targets_list.size() != targets_orig_list.size())
@@ -174,8 +213,18 @@ bool ZBot::Stage1AI_3()
 		//match targets to units
 		MatchTargets_3(units_list, targets_orig_list);
 
+		zod_bot_zeit(1, bt);
+
 		//give out orders
 		GiveOutOrders_3(units_list, targets_orig_list);
+
+		zod_bot_zeit(2, bt);
+	}
+
+	{
+		unsigned long t = bt0;
+
+		zod_bot_zeit(3, t);
 	}
 
 	last_order_time = the_time;

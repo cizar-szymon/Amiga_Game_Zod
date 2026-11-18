@@ -183,6 +183,16 @@ else ifeq ($(PLATFORM),amiga)
   CXXFLAGS += $(OMITFP)
   CFLAGS   += $(OMITFP)
   ENGINE   := $(BUILD)/zod_$(CPUSUF)
+
+  # Groessenklassen-Allokator statt malloc aus libnix
+  # (port/amiga/amiga_fastmalloc.c, aus dem AmiXcom-Port; plan 6v).
+  # FASTMALLOC=0: ohne, als zod_<cpu>nofm fuer A/B -- gleiche Objekte, nur
+  # eine Datei weniger beim Binden.
+  ifeq ($(FASTMALLOC),0)
+    ENGINE   := $(BUILD)/zod_$(CPUSUF)nofm
+  else
+    ENGINE_C_SRCS += port/amiga/amiga_fastmalloc.c
+  endif
 else
   $(error PLATFORM muss host oder amiga sein)
 endif
