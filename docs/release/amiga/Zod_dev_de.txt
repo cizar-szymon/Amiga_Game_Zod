@@ -64,6 +64,8 @@ Schalter:
   ZOD_ENDTEST "s f"   jede Runde endet nach s Sekunden; f ist eine Folge
                       aus s (gewonnen) und n (verloren), reihum, z. B.
                       "15 ns"; Karten starten ohne "Click to Start"
+  ZOD_VIDEOSTART "p g" die Filme der Kampagne beginnen bei Planet p, Gebiet g
+                      (1-5, 1-4); mit ZOD_ENDTEST prüft das das Ende
 
 Messungen:
 

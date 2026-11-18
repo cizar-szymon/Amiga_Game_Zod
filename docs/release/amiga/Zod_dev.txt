@@ -61,6 +61,8 @@ Przełączniki:
   ZOD_ENDTEST "s f"   koniec każdej rundy po s sekundach; f to kolejka
                       s (wygrana) i n (przegrana) po kolei, np. "15 ns";
                       mapy startują bez "Click to Start"
+  ZOD_VIDEOSTART "p o" filmy kampanii zaczynają się od planety p, obszaru o
+                      (1-5, 1-4); z ZOD_ENDTEST sprawdza koniec kampanii
 
 Pomiary:
 

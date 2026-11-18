@@ -199,6 +199,25 @@ ZPlayer::ZPlayer() : ZClient()
 	fps_an = true;               /* ohne -F wie bisher: Bildrate sichtbar */
 	video_planet = 0;            /* die Kampagne beginnt auf der Wueste */
 	video_stufe = 0;
+
+	/* Testschalter ZOD_VIDEOSTART "<planet> <gebiet>" (je ab 1): die
+	 * Filmfolge der Kampagne beginnt dort statt auf der Wueste, damit
+	 * zusammen mit ZOD_ENDTEST das Ende (City, Abspann) ohne die 15
+	 * Runden davor pruefbar ist. Ohne Schalter unveraendert. */
+	{
+		char wahl[16];
+
+		if(zod_env("ZOD_VIDEOSTART", wahl, sizeof(wahl)))
+		{
+			int p = 1, s = 1;
+
+			sscanf(wahl, "%d %d", &p, &s);
+			if(p >= 1 && p <= 5)                  video_planet = p - 1;   /* 5 = City */
+			if(s >= 1 && s <= 4)                  video_stufe  = s - 1;
+			ZLOG("ZOD_VIDEOSTART: Filme ab Planet %d Gebiet %d\n",
+			     video_planet + 1, video_stufe + 1);
+		}
+	}
 	lade_planet = -1;            /* unbekannt -> bisheriges Ladebild */
 	lade_prozent_gezeigt = -1;
 	lade_name[0] = 0;

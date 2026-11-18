@@ -61,6 +61,8 @@ Switches:
   ZOD_ENDTEST "s f"   end every round after s seconds; f is a pattern of
                       s (won) and n (lost) used in turn, e.g. "15 ns";
                       maps start without "Click to Start"
+  ZOD_VIDEOSTART "p a" the campaign films start at planet p, area a
+                      (1-5, 1-4); with ZOD_ENDTEST it tests the end
 
 Benchmarks:
 
