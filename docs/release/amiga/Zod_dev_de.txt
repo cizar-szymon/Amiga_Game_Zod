@@ -1,0 +1,82 @@
+ZOD ENGINE WARP @V@ - FÜR ENTWICKLER
+=====================================
+
+Quellen: das GitHub-Repository des Projekts (GPLv3), Zweig warp-060. Die
+Warp-Fassung ist Cegos AmigaOS-Portierung der Zod Engine mit Änderungen für
+Warp-Karten; jeder schnelle Weg hat einen Vergleichsmodus gegen den alten
+Code.
+
+
+BAUEN
+-----
+
+Cross-Compiler: m68k-amigaos-gcc von bebbo (libnix, -noixemul).
+
+  make PLATFORM=amiga CPU=68060            das Spiel: build/amiga/zod_060
+  make PLATFORM=amiga CPU=68060 launcher   ZodLaunch (braucht MUI-Header)
+  make PLATFORM=amiga CPU=68060 jvplay     der Filmspieler
+  make PLATFORM=amiga CPU=68060 extract    ZExtract
+  make PLATFORM=amiga CPU=68060 FASTMALLOC=0   ohne eigene Speicherverwaltung
+                                               (build/amiga/zod_060nofm)
+  make hosttest                            die Host-Tests (Linux)
+
+Die Ausgabenummer steht nur in port/zod_version.h;
+tools/release/make_release.sh baut releases/amiga und verweigert ein
+Programm, dessen $VER diese Nummer nicht trägt.
+
+
+DAS PROTOKOLL
+-------------
+
+  zod_060 ... -L RAM:zod-log.txt     Protokoll in eine Datei
+                                     (ZodLaunch: Arguments)
+  zod_060 ... -B 60                  Messung: 60 s, danach Bildzahl und
+                                     Aufteilung der Bildzeit im Protokoll
+  zod_060 -F on|off                  Bildrate auf dem Schirm
+
+
+TESTSCHALTER (Umgebungsvariablen, in der Shell Set NAME Wert)
+-------------------------------------------------------------
+
+Vergleichsmodi - jeder rechnet den schnellen und den alten Weg nebeneinander
+und schreibt die Zahl der Abweichungen ins Protokoll (muss 0 sein):
+
+  ZOD_PEGRID 2        Zielraster (CheckPassiveEngage, CheckAttackTo)
+  ZOD_PFCHECK 1       offene Liste des A*: Baum gegen lineare Suche
+  ZOD_PFFASTCHECK 1   ganze A*-Wege: schnell gegen alt
+  ZOD_PFTILECHECK 1   kompakte Kacheldaten
+  ZOD_MMCHECK 1       Minikarte
+  ZOD_NEARCHECK 1     NearestObjectFromList
+  ZOD_SORTCACHE 2     Sortierspeicher der Zeichenlisten, Ergebnis gegen
+                      stable_sort
+  ZOD_KLANGCHECK 1    Gebäudeklänge und Einschlagsplitter
+  ZOD_INERTCHECK 1    ruhende Kartenobjekte im Server
+  ZOD_ROCKBAKE 2      Felsoberseiten in die Karte eingebacken
+  ZOD_VERIFY 1        Bild von der Karte zurückgelesen und verglichen
+
+Schalter:
+
+  ZOD_PEGRID aus      Zielraster aus
+  ZOD_PFFAST aus      schneller Nachbarweg des A* aus
+  ZOD_PFBUDGET n      Wegsuchzeit pro Bild in Mikrosekunden
+                      (Vorgabe 32000)
+  ZOD_ENDTEST "s f"   jede Runde endet nach s Sekunden; f ist eine Folge
+                      aus s (gewonnen) und n (verloren), reihum, z. B.
+                      "15 ns"; Karten starten ohne "Click to Start"
+
+Messungen:
+
+  ZOD_BENCHARMY n     n Robotergruppen je Team nahe der Kartenmitte
+  ZOD_BENCHFOLLOW 1   Kamera springt alle 8 s zur größten Gruppe
+  ZOD_BENCHSCROLL 1   Kamera scrollt ständig
+
+Die übrigen ZOD_*-Namen in den Quellen (grep zod_env) sind Messhilfen
+einzelner Schritte; sie sind dort beschrieben, wo sie gelesen werden.
+
+
+MESSEN
+------
+
+Nur auf einem echten Amiga mit Warp-Karte messen. Ein ReadEClock kostet auf
+einer Warp 1260 etwa 13 Mikrosekunden; die Teilzeiten im Protokoll sind
+deshalb zu hoch, verlässlich sind Bildzahlen und Mittelwerte.

@@ -1,4 +1,5 @@
 #include "gmm_main_menu.h"
+#include "zod_version.h"
 
 gmm_warning_flag GMMMainMenu::QuitWarningFlags()
 {
@@ -30,8 +31,17 @@ GMMMainMenu::GMMMainMenu() : ZGuiMainMenuBase()
 		AddWidget(&menu_button[i]);
 	}
 
+	//Warp: die Nummer der Ausgabe unter den Knoepfen -- damit ein
+	//Fehlerbericht sagt, welcher Stand lief (port/zod_version.h).
+	version_label.SetFont(SMALL_WHITE_FONT);
+	version_label.SetText("Warp " ZOD_VERSION);
+	version_label.SetCoords(GMM_SIDE_MARGIN, GMM_TITLE_MARGIN + i*(GMMWBUTTON_HEIGHT+1) + 1);
+	version_label.SetDimensions(w - (GMM_SIDE_MARGIN * 2), MMLABEL_HEIGHT);
+	version_label.SetJustification(MMLABEL_CENTER);
+	AddWidget(&version_label);
+
 	//cheap hack for h
-	h = GMM_TITLE_MARGIN + i*(GMMWBUTTON_HEIGHT+1) + GMM_BOTTOM_MARGIN;
+	h = GMM_TITLE_MARGIN + i*(GMMWBUTTON_HEIGHT+1) + MMLABEL_HEIGHT + 2 + GMM_BOTTOM_MARGIN;
 
 	//needed if w is ever changed / set
 	UpdateDimensions();

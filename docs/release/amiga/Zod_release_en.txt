@@ -1,0 +1,30 @@
+ZOD ENGINE WARP - RELEASES
+==========================
+
+Bug reports: on the project's GitHub page (Issues), with the release number
+(game menu "Warp x.xx", ZodLaunch title, or "Version zod_060" in a Shell)
+and the log (-L RAM:zod-log.txt under "Arguments" in ZodLaunch).
+
+
+0.12 (18.11.2026)
+-----------------
+
+  - The loading screen shows the progress in percent ("LOADING 37%").
+  - The game data is read in large blocks: from the start of the game to
+    the first map takes about 9 seconds on a Warp 7060.
+
+
+0.11 (18.11.2026)
+-----------------
+
+First release of the Warp build.
+
+  - Drawing goes straight to the Warp card's video memory; scrolling is
+    done by the card's blitter.
+  - Large battles: about 15 frames per second with 200 robots on a
+    Warp 1260 (A1200).
+  - Original Z Story Mode with all films, the statistics screen and music
+    (instrument bank from Aminet, see Install.txt).
+  - The game runs without films, without jvplay or with only some of the
+    films; missing films are skipped.
+  - Release number in the game menu, in ZodLaunch and in Version.

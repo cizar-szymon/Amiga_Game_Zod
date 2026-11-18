@@ -80,3 +80,16 @@ PROGDIR:*
 # music/ ist das Arbeitsverzeichnis fuer die Laeufe auf der V1200.
 /music/
 /MIDI_Instruments*
+
+# release: older public archives and anything private (never in git)
+private/
+
+# Warp: die Einstellungsvorgabe des Ausgabepakets gehoert hinein (nur binaer=zod_060)
+!docs/release/amiga/ZodLaunch.cfg
+
+# Warp: das fertige Ausgabepaket (tools/release/make_release.sh) traegt die Daten
+# der Engine (zod_engine.zpk, Karten) -- es kommt NICHT ins Repository, sondern
+# als Datei unter GitHub Releases (Entscheidung des Nutzers 18.11.2026).
+releases/
+# Bild der ZodLaunch-Ikone ("Z needs you!", Grafik zum Spiel) -- wie die Daten nicht ins Repository
+tools/release/icon/zod_icon.jpeg

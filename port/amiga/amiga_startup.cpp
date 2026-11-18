@@ -9,6 +9,7 @@
 #include <proto/exec.h>
 
 #include "zod_log.h"
+#include "zod_version.h"
 
 static BPTR old_dir = 0;
 static int have_old_dir = 0;
@@ -107,9 +108,16 @@ static void stapel_melden(void)
 		     " Ueber ZodLaunch starten (setzt 262144).\n");
 }
 
+/* `Version zod_060` liest diese Zeile. `used`, damit der Linker sie nicht
+ * als unbenutzt verwirft. */
+__attribute__((used)) static const char zod_verstag[] =
+	"$VER: Zod " ZOD_VERSION " (" ZOD_VERSION_DATE ") Zod Engine Warp";
+
 void zod_amiga_startup(void)
 {
 	__decimalpoint = (char *)".";
+
+	(void)zod_verstag;
 
 	stapel_melden();
 

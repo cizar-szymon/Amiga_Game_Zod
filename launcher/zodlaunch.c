@@ -77,6 +77,7 @@
 #endif /* !ZOD_LAUNCH_TEST */
 
 #include <stdio.h>
+#include "../port/zod_version.h"   /* eine Nummer fuer Spiel und Launcher */
 #include <string.h>
 #include <stdlib.h>
 
@@ -1020,14 +1021,14 @@ int main(int argc, char **argv)
 
     app = ApplicationObject,
         MUIA_Application_Title,       (ULONG)"ZodLaunch",
-        MUIA_Application_Version,     (ULONG)"$VER: ZodLaunch 1.2 (24.09.2026)",
+        MUIA_Application_Version,     (ULONG)"$VER: ZodLaunch " ZOD_VERSION " (" ZOD_VERSION_DATE ")",
         MUIA_Application_Copyright,   (ULONG)"GPLv3",
         MUIA_Application_Author,      (ULONG)"Zod Engine port",
         MUIA_Application_Description, (ULONG)"Launcher for the Zod Engine",
         MUIA_Application_Base,        (ULONG)"ZODLAUNCH",
 
         SubWindow, fenster = WindowObject,
-            MUIA_Window_Title, (ULONG)"Start Zod Engine",
+            MUIA_Window_Title, (ULONG)"Start " ZOD_VERSION_TEXT,
             MUIA_Window_ID,    MAKE_ID('Z','O','D','L'),
             WindowContents, VGroup,
 

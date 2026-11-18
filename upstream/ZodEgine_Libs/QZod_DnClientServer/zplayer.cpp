@@ -12,6 +12,7 @@ extern "C" void zod_alloc_report(const char *tag);
 
 #include "fineclock.h"        /* feine Uhr fuer die Bildratenanzeige, beide Plattformen */
 #include "amiga_startup.h"   /* zod_env: Schalter lesen, auf beiden Plattformen */
+unsigned long zod_lade_ms(void);   /* Warp: ms seit Programmstart, siehe LadeProzent */
 
 /* Deckel auf die GEZEICHNETE Groesse -- Flugbahn und Mechanik unberuehrt. */
 extern "C" void zod_roto_max_set(int hundertstel);
@@ -199,6 +200,7 @@ ZPlayer::ZPlayer() : ZClient()
 	video_planet = 0;            /* die Kampagne beginnt auf der Wueste */
 	video_stufe = 0;
 	lade_planet = -1;            /* unbekannt -> bisheriges Ladebild */
+	lade_prozent_gezeigt = -1;
 	lade_name[0] = 0;
 	lade_level = 0;
 	lade_schirm_steht = false;
@@ -500,6 +502,7 @@ void ZPlayer::Setup()
 	 * ohne den Schirm anzufassen -- die bisherige Prozentanzeige hat sich
 	 * aus demselben Grund nie bewegt. */
 	lade_schirm_steht = false;
+	ZLOG("Ladebild: kommt nach %lu ms seit Programmstart\n", zod_lade_ms());
 
 	if(lade_planet >= 0)
 	{
@@ -556,11 +559,10 @@ void ZPlayer::Setup()
 				                100, zeile);
 			}
 
-			zod_schirm_schrift("laden", 1);
-			zod_schirm_text((320 - zod_schirm_breite("LOADING")) / 2,
-			                131, "LOADING");
-
-			zod_schirm_ausgeben();
+			/* "LOADING" samt Prozentzahl -- LadeProzent zeichnet beides
+			 * und gibt das Bild aus. */
+			lade_prozent_gezeigt = -1;
+			LadeProzent(0);
 		}
 	}
 
@@ -601,21 +603,21 @@ void ZPlayer::Setup()
 
 	//important to keep the server from crashing us
 	ZTeam::Init();
-	ZLOG("Start: ZTeam::Init fertig\n");
+	ZLOG("Start: ZTeam::Init fertig (%lu ms)\n", zod_lade_ms());
 	ZMap::Init();
-	ZLOG("Start: ZMap::Init fertig\n");
+	ZLOG("Start: ZMap::Init fertig (%lu ms)\n", zod_lade_ms());
 	zhud.Init();
-	ZLOG("Start: zhud.Init fertig\n");
+	ZLOG("Start: zhud.Init fertig (%lu ms)\n", zod_lade_ms());
 	ORock::Init();
-	ZLOG("Start: ORock::Init fertig\n");
+	ZLOG("Start: ORock::Init fertig (%lu ms)\n", zod_lade_ms());
 	SetupSelectionImages();
-	ZLOG("Start: SetupSelectionImages fertig\n");
+	ZLOG("Start: SetupSelectionImages fertig (%lu ms)\n", zod_lade_ms());
 
 	//if(!disable_zcursor) SDL_ShowCursor(SDL_DISABLE);
 
 	//synchron laden: unter AmigaOS soll das Spiel in einem Task laufen
 	Load_Graphics(this);
-	ZLOG("Start: Load_Graphics fertig\n");
+	ZLOG("Start: Load_Graphics fertig (%lu ms)\n", zod_lade_ms());
 
 	/* Ladebild weg und gemeinsame Palette zurueck. */
 	if(lade_schirm_steht)
@@ -636,6 +638,67 @@ void ZPlayer::Setup()
 	 * gemeldet und im Bildschirmfoto bestaetigt. Ein einziges Loeschen hier
 	 * genuegt; es kostet nichts und gilt auf allen Plattformen gleich. */
 	if(screen) SDL_FillRect(screen, nullptr, SDL_MapRGB(screen->format, 0, 0, 0));
+}
+
+/* Warp (18.11.2026): Prozentanzeige auf dem Ladebild.
+ *
+ * Load_Graphics laedt am Stueck rund 7000 Bilder; auf einer Warp 1260 dauert
+ * das viele Sekunden, und ein stehendes Bild sah aus wie ein Absturz (vom
+ * Nutzer gemeldet). Nach jedem der 80 Schritte steht hier "LOADING xx%" neu
+ * unter dem Originalbild -- Schrift des Originals ("laden"), Farben aus der
+ * Palette des Bildes. Die Schrift hat kein '%' (am Schirm gesehen:
+ * "LOADING 1"); zod_schirm_prozent zeichnet es dazu. Neu gezeichnet wird
+ * nur, wenn sich die Zahl aendert. Ohne Ladebild (kein zod_screens.zpk)
+ * bleibt es beim Merken der Zahl. */
+/* Warp: Millisekunden seit dem ersten Aufruf -- main() ruft sie gleich nach
+ * dem Start, die Zeiten im Protokoll zaehlen also ab Programmstart
+ * (fineclock: ReadEClock). */
+unsigned long zod_lade_ms(void)
+{
+	static unsigned long t0 = 0;
+	static int an = 0;
+	unsigned long jetzt = zod_fineclock_ticks();
+	unsigned long proms = zod_fineclock_freq() / 1000;
+
+	if(!an) { an = 1; t0 = jetzt; }
+	if(!proms) proms = 1;
+
+	return (jetzt - t0) / proms;
+}
+
+void ZPlayer::LadeProzent(int prozent)
+{
+	char zeile[32];
+
+	{
+		static unsigned long vorher = 0;
+		unsigned long t = zod_lade_ms();
+
+		ZLOG("Laden: %3d%% bei %lu ms (+%lu)\n", prozent, t, t - vorher);
+		vorher = t;
+	}
+
+	loaded_percent = prozent;
+
+	if(!lade_schirm_steht || prozent == lade_prozent_gezeigt) return;
+
+	lade_prozent_gezeigt = prozent;
+
+	snprintf(zeile, sizeof(zeile), "LOADING %d", prozent);
+
+	/* Die Zeile aus dem Bild zurueckholen, sonst bliebe die alte Zahl
+	 * darunter stehen (die Breite aendert sich mit der Zahl). Fuer die
+	 * Zentrierung zaehlt das '%' mit etwa 8 Bildpunkten mit. */
+	zod_schirm_putzen(0, 129, 320, 16);
+	zod_schirm_schrift("laden", 1);
+	{
+		int b = zod_schirm_breite(zeile) + 8;
+		int x = (320 - b) / 2;
+
+		zod_schirm_text(x, 131, zeile);
+		zod_schirm_prozent(x + zod_schirm_breite(zeile) + 2, 131);
+	}
+	zod_schirm_ausgeben();
 }
 
 void ZPlayer::InitSDL()
@@ -874,86 +937,86 @@ int ZPlayer::Load_Graphics(void *p)
 	const int max_items = 80;
 	int loaded_items = 0;
 
-	ZCompMessageEngine::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZSoundEngine::Init(&((ZPlayer*)p)->zmap); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	if(!((ZPlayer*)p)->disable_zcursor) ZCursor::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZObject::Init(((ZPlayer*)p)->ttf_font_7); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZBuilding::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZCannon::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZVehicle::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZRobot::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ABird::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	AHutAnimal::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	BFort::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	BRepair::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	BRadar::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	BRobot::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	BVehicle::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	BBridge::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	OFlag::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	OGrenades::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ORockets::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	OHut::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	OMapObject::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	CGatling::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	CGun::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	CHowitzer::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	CMissileCannon::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VJeep::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VLight::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VMedium::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VHeavy::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VAPC::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VMissileLauncher::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	VCrane::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	RGrunt::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	RPsycho::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	RLaser::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	RPyro::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	RSniper::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	RTough::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ELaser::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EFlame::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EPyroFire::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EToughRocket::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EToughMushroom::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EToughSmoke::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ELightRocket::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ELightInitFire::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EMoMissileRockets::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EMissileCRockets::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ERobotDeath::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ERobotTurrent::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EUnitParticle::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EDeath::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EStandard::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EDeathSparks::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ETurrentMissile::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ESideExplosion::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ECannonDeath::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ERockParticle::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ERockTurrent::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EMapObjectTurrent::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	EBridgeTurrent::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ECraneConco::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ETrack::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ETankDirt::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ETankSmoke::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ETankOil::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ETankSpark::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GWProduction::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GWFactoryList::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GWLogin::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GWCreateUser::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZGuiMainMenuBase::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GMMWButton::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GMMWList::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GMMWRadio::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	GMMWTeamColor::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZGuiButton::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZGuiScrollBar::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZPortrait::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
-	ZVote::Init(); ((ZPlayer*)p)->loaded_percent = 100 * ++loaded_items / max_items;
+	ZCompMessageEngine::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZSoundEngine::Init(&((ZPlayer*)p)->zmap); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	if(!((ZPlayer*)p)->disable_zcursor) ZCursor::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZObject::Init(((ZPlayer*)p)->ttf_font_7); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZBuilding::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZCannon::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZVehicle::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZRobot::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ABird::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	AHutAnimal::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	BFort::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	BRepair::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	BRadar::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	BRobot::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	BVehicle::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	BBridge::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	OFlag::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	OGrenades::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ORockets::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	OHut::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	OMapObject::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	CGatling::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	CGun::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	CHowitzer::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	CMissileCannon::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VJeep::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VLight::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VMedium::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VHeavy::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VAPC::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VMissileLauncher::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	VCrane::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	RGrunt::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	RPsycho::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	RLaser::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	RPyro::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	RSniper::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	RTough::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ELaser::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EFlame::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EPyroFire::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EToughRocket::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EToughMushroom::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EToughSmoke::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ELightRocket::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ELightInitFire::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EMoMissileRockets::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EMissileCRockets::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ERobotDeath::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ERobotTurrent::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EUnitParticle::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EDeath::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EStandard::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EDeathSparks::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ETurrentMissile::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ESideExplosion::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ECannonDeath::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ERockParticle::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ERockTurrent::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EMapObjectTurrent::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	EBridgeTurrent::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ECraneConco::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ETrack::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ETankDirt::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ETankSmoke::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ETankOil::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ETankSpark::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GWProduction::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GWFactoryList::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GWLogin::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GWCreateUser::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZGuiMainMenuBase::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GMMWButton::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GMMWList::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GMMWRadio::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	GMMWTeamColor::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZGuiButton::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZGuiScrollBar::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZPortrait::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
+	ZVote::Init(); ((ZPlayer*)p)->LadeProzent(100 * ++loaded_items / max_items);
 
 
 	//this should only ever
@@ -963,6 +1026,11 @@ int ZPlayer::Load_Graphics(void *p)
 #endif	
 
 	ZLOG("graphics loaded\n");
+	{
+		extern void zod_pack_zeit_report(void);
+
+		zod_pack_zeit_report();   /* Warp: Ladezeit der Archive (port/zod_pack.cpp) */
+	}
 	((ZPlayer*)p)->graphics_loaded = true;
 
 	return 1;

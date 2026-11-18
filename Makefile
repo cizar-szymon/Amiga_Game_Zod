@@ -488,7 +488,7 @@ $(BUILD)/fpu_probe: $(FPUPROBE_OBJS)
 # beim verschachtelten MUI-Stil (siehe Kommentar in launcher/zodlaunch.c).
 # Die C++-Flags (-fno-exceptions/-fno-rtti) gelten hier nicht.
 launcher: $(BUILD)/ZodLaunch
-$(BUILD)/ZodLaunch: launcher/zodlaunch.c
+$(BUILD)/ZodLaunch: launcher/zodlaunch.c port/zod_version.h
 	@mkdir -p $(dir $@)
 	$(CC) -noixemul $(CPUFLAGS) -O2 -I$(AMIGA_SDL_INC) $< -o $@ -lmui -lamiga
 

@@ -1,0 +1,79 @@
+ZOD ENGINE WARP @V@ - FOR DEVELOPERS
+=====================================
+
+Sources: the project's GitHub repository (GPLv3), branch warp-060. The
+Warp build is Cego's AmigaOS port of the Zod Engine with changes for Warp
+cards; every fast path keeps a compare mode against the old code.
+
+
+BUILDING
+--------
+
+Cross compiler: bebbo's m68k-amigaos-gcc (libnix, -noixemul).
+
+  make PLATFORM=amiga CPU=68060            the game: build/amiga/zod_060
+  make PLATFORM=amiga CPU=68060 launcher   ZodLaunch (needs MUI headers)
+  make PLATFORM=amiga CPU=68060 jvplay     the film player
+  make PLATFORM=amiga CPU=68060 extract    ZExtract
+  make PLATFORM=amiga CPU=68060 FASTMALLOC=0   without the own allocator
+                                               (build/amiga/zod_060nofm)
+  make hosttest                            the host tests (Linux)
+
+The release number lives in port/zod_version.h only;
+tools/release/make_release.sh builds releases/amiga and refuses a binary
+whose $VER does not carry that number.
+
+
+THE LOG
+-------
+
+  zod_060 ... -L RAM:zod-log.txt     log into a file (ZodLaunch: Arguments)
+  zod_060 ... -B 60                  benchmark: 60 s, then frames and a
+                                     split of the frame time in the log
+  zod_060 -F on|off                  frame rate on screen
+
+
+TEST SWITCHES (environment variables, Set NAME value in a Shell)
+------------------------------------------------------------------
+
+Compare modes - each runs the fast and the old path side by side and
+writes the number of differences into the log (must be 0):
+
+  ZOD_PEGRID 2        target grid (CheckPassiveEngage, CheckAttackTo)
+  ZOD_PFCHECK 1       A* open list: tree against linear search
+  ZOD_PFFASTCHECK 1   whole A* paths: fast against old
+  ZOD_PFTILECHECK 1   compact tile store
+  ZOD_MMCHECK 1       minimap
+  ZOD_NEARCHECK 1     NearestObjectFromList
+  ZOD_SORTCACHE 2     draw-list sort cache, result against stable_sort
+  ZOD_KLANGCHECK 1    building sounds and missile particles
+  ZOD_INERTCHECK 1    idle map objects in the server
+  ZOD_ROCKBAKE 2      rock tops baked into the map
+  ZOD_VERIFY 1        screen read back from the card and compared
+
+Switches:
+
+  ZOD_PEGRID aus      target grid off
+  ZOD_PFFAST aus      fast A* neighbour path off
+  ZOD_PFBUDGET n      path finding time per frame in microseconds
+                      (default 32000)
+  ZOD_ENDTEST "s f"   end every round after s seconds; f is a pattern of
+                      s (won) and n (lost) used in turn, e.g. "15 ns";
+                      maps start without "Click to Start"
+
+Benchmarks:
+
+  ZOD_BENCHARMY n     n groups of robots per team near the map centre
+  ZOD_BENCHFOLLOW 1   camera jumps to the largest group every 8 s
+  ZOD_BENCHSCROLL 1   camera scrolls all the time
+
+The other ZOD_* names in the sources (grep zod_env) are measuring aids of
+single steps; they are described where they are read.
+
+
+MEASURING
+---------
+
+Measure only on a real Amiga with a Warp card. One ReadEClock costs about
+13 microseconds on a Warp 1260, so the per-section times in the log are
+too high; trust the frame counts and averages.

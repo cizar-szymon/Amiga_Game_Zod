@@ -30,10 +30,19 @@ void ZFont::Init()
 		 * stillschweigend ohne Ergebnis, weil niemand den Rueckgabewert prueft. */
 		char_img[i] = zod_pack_load_quiet(filename_c);
 
-		if(!char_img[i]) char_img[i] = IMG_Load(filename_c);
+		/* Warp (18.11.2026): die Einzeldatei nur, wenn es GAR KEINE Archive
+		 * gibt. Die Schleife fragt alle 255 Codes ab, die Schriften haben
+		 * aber nur rund 95 Zeichen -- jeder fehlende Code war ein
+		 * vergeblicher Dateizugriff auf der Platte. Gemessen (Amiga 2):
+		 * etwa 4 s schwarzer Schirm vor dem Ladebild. Die Archive enthalten
+		 * jede Schrift vollstaendig (packs/zod_fonts.zpk von ZExtract), und
+		 * die Zahl der geladenen Zeichen steht im Protokoll. */
+		if(!char_img[i] && !zod_pack_available()) char_img[i] = IMG_Load(filename_c);
 
 		if(char_img[i]) loaded++;
 	}
+
+	ZLOG("ZFont: %s -- %d Zeichen\n", font_type_string[type].c_str(), loaded);
 
 	/* Ohne diese Meldung war ein Totalausfall der Schrift unsichtbar: die
 	 * Knoepfe erscheinen dann einfach unbeschriftet, und im Mitschnitt steht

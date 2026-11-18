@@ -11,6 +11,13 @@
 #include <vector>
 
 #include "zod_log.h"
+#include "fineclock.h"
+#include "amiga_startup.h"   /* zod_env: ZOD_PACKCHECK */
+
+/* Warp-Messung (18.11.): Lesen gegen Aufbereiten im Archiv, Bericht am Ende
+ * von Load_Graphics (zod_pack_zeit_report, unten beim Blockspeicher). */
+static unsigned long zod_pk_io = 0, zod_pk_bau = 0;
+static void pk_bloecke_frei(void);
 
 #define ZPK_ENTRY_SIZE 24
 /* Wo die Archive liegen. Auch levelnames.dat (die Levelbezeichnungen von
@@ -340,6 +347,8 @@ void zod_pack_shutdown(void)
 	for(size_t i = 0; i < packs.size(); i++)
 		if(packs[i].fp) fclose(packs[i].fp);
 
+	pk_bloecke_frei();
+
 	packs.clear();
 	entries.clear();
 }
@@ -355,6 +364,146 @@ int zod_pack_available(void)
 }
 
 static SDL_Surface *pack_load_opt(const char *name, int report_missing);
+static SDL_Surface *pack_build(const Entry &e, const unsigned char *b);
+
+/* Warp (18.11.2026): Blockspeicher fuer das Lesen aus den Archiven.
+ *
+ * Gemessen auf Amiga 2 (Warp 7060, Karte SD): beim Start gingen von 32 s
+ * Ladezeit 25-27 s allein in fseek+fread -- je Bild ein Suchen und ein
+ * kleines Lesen, rund 7,6 ms, bei ~3300 Bildern. Das Aufbereiten kostete
+ * zusammen unter 1 s. Hier wird stattdessen in Bloecken zu 64 KB gelesen
+ * und aus dem Speicher kopiert; die Bilder eines Objekts liegen im Archiv
+ * hintereinander, ein Block bedient also viele Bilder.
+ *
+ * 16 Bloecke = 1 MB, am laengsten unbenutzter wird ersetzt. Grosse Eintraege
+ * (ab 4 Bloecken: Vollbilder, Klaenge) gehen weiter direkt an die Datei.
+ * ZOD_PACKCHECK 1 liest jeden Eintrag zusaetzlich auf dem alten Weg und
+ * vergleicht die Bytes (Protokoll: "Archiv-Pruefung", muss 0 sein). */
+#define PK_BLOCK  65536UL
+#define PK_BLOCKS 16
+
+struct PkBlock
+{
+	int pack;
+	unsigned long nr;
+	unsigned long len;
+	unsigned long stempel;
+	unsigned char *daten;
+};
+
+static PkBlock pk_block[PK_BLOCKS];
+static unsigned long pk_uhr = 0;
+static unsigned long pk_geprueft = 0, pk_falsch = 0, pk_gelesen = 0;
+
+static int pack_read_direkt(int pk, unsigned long off, unsigned long len, unsigned char *dst)
+{
+	FILE *fp = packs[pk].fp;
+
+	if(fseek(fp, (long)off, SEEK_SET)) return 0;
+
+	return !len || fread(dst, 1, len, fp) == len;
+}
+
+static int pack_read(int pk, unsigned long off, unsigned long len, unsigned char *dst)
+{
+	if(len >= 4 * PK_BLOCK) return pack_read_direkt(pk, off, len, dst);
+
+	while(len)
+	{
+		unsigned long nr = off / PK_BLOCK, in = off % PK_BLOCK, teil;
+		PkBlock *b = 0, *alt = 0;
+		int i;
+
+		for(i = 0; i < PK_BLOCKS; i++)
+		{
+			PkBlock *k = &pk_block[i];
+
+			if(k->daten && k->pack == pk && k->nr == nr && k->len) { b = k; break; }
+			if(!alt || !k->daten || (alt->daten && k->stempel < alt->stempel)) alt = k;
+		}
+
+		if(!b)
+		{
+			b = alt;
+
+			if(!b->daten && !(b->daten = (unsigned char *)malloc(PK_BLOCK)))
+				return pack_read_direkt(pk, off, len, dst);
+
+			b->pack = pk;
+			b->nr = nr;
+			b->len = 0;
+
+			if(!fseek(packs[pk].fp, (long)(nr * PK_BLOCK), SEEK_SET))
+				b->len = (unsigned long)fread(b->daten, 1, PK_BLOCK, packs[pk].fp);
+
+			pk_gelesen++;
+		}
+
+		b->stempel = ++pk_uhr;
+
+		if(in >= b->len) { b->len = 0; return 0; }   /* hinter dem Dateiende */
+
+		teil = b->len - in;
+		if(teil > len) teil = len;
+
+		memcpy(dst, b->daten + in, teil);
+		dst += teil;
+		off += teil;
+		len -= teil;
+	}
+
+	return 1;
+}
+
+static void pk_bloecke_frei(void)
+{
+	for(int i = 0; i < PK_BLOCKS; i++)
+	{
+		free(pk_block[i].daten);
+		pk_block[i].daten = 0;
+	}
+}
+
+void zod_pack_zeit_report(void)
+{
+	unsigned long ms = zod_fineclock_freq() / 1000;
+
+	if(!ms) ms = 1;
+	ZLOG("Archiv-Zeit: lesen %lu ms, aufbereiten %lu ms, %lu Bloecke zu 64 KB gelesen\n",
+	     zod_pk_io / ms, zod_pk_bau / ms, pk_gelesen);
+
+	if(pk_geprueft)
+		ZLOG("Archiv-Pruefung: %lu Eintraege verglichen, %lu abweichend -- muss 0 sein\n",
+		     pk_geprueft, pk_falsch);
+}
+
+/* Liest einen Eintrag; mit ZOD_PACKCHECK auch auf dem alten Weg zum Vergleich. */
+static int pack_read_eintrag(const Entry &e, unsigned char *dst)
+{
+	static int pruefen = -1;
+
+	if(pruefen < 0)
+	{
+		char wahl[8];
+
+		pruefen = zod_env("ZOD_PACKCHECK", wahl, sizeof(wahl)) && wahl[0] != '0';
+	}
+
+	if(!pack_read(e.pack, e.data_off, e.data_len, dst)) return 0;
+
+	if(pruefen && e.data_len)
+	{
+		std::vector<unsigned char> alt(e.data_len);
+
+		pk_geprueft++;
+
+		if(!pack_read_direkt(e.pack, e.data_off, e.data_len, &alt[0]) ||
+		   memcmp(&alt[0], dst, e.data_len))
+			pk_falsch++;
+	}
+
+	return 1;
+}
 
 SDL_Surface *zod_pack_load(const char *name)
 {
@@ -386,18 +535,31 @@ static SDL_Surface *pack_load_opt(const char *name, int report_missing)
 		return 0;
 	}
 
-	Pack &pack = packs[it->pack];
-	std::vector<unsigned char> blob(it->data_len);
+	std::vector<unsigned char> blob(it->data_len ? it->data_len : 1);
+	unsigned long zt0 = zod_fineclock_ticks();
 
-	if(fseek(pack.fp, (long)it->data_off, SEEK_SET) ||
-	   (it->data_len && fread(&blob[0], 1, it->data_len, pack.fp) != it->data_len))
+	if(!pack_read_eintrag(*it, &blob[0]))
 	{
 		ZLOG("Archiv-Eintrag nicht lesbar: %s\n", name);
 		return 0;
 	}
 
-	if(it->fmt == ZPK_FMT_INDEXED) return build_indexed(*it, &blob[0]);
-	if(it->fmt == ZPK_FMT_RGB565) return build_rgb565(*it, &blob[0]);
+	unsigned long zt1 = zod_fineclock_ticks();
+
+	zod_pk_io += zt1 - zt0;
+
+	SDL_Surface *erg = pack_build(*it, &blob[0]);
+
+	zod_pk_bau += zod_fineclock_ticks() - zt1;
+
+	return erg;
+}
+
+static SDL_Surface *pack_build(const Entry &e, const unsigned char *b)
+{
+	const Entry *it = &e;
+	if(it->fmt == ZPK_FMT_INDEXED) return build_indexed(*it, b);
+	if(it->fmt == ZPK_FMT_RGB565) return build_rgb565(*it, b);
 	if(it->fmt == ZPK_FMT_SHARED8)
 	{
 		if(!zod_palette_ready())
@@ -414,7 +576,7 @@ static SDL_Surface *pack_load_opt(const char *name, int report_missing)
 				ZLOG("Archiv: %lu Bilder geladen\n", n);
 		}
 
-		return build_shared8(*it, &blob[0]);
+		return build_shared8(*it, b);
 	}
 
 	return 0;
@@ -459,10 +621,7 @@ int zod_pack_load_sound(const char *name, unsigned char **data,
 	unsigned char *buf = (unsigned char*)malloc(it->data_len ? it->data_len : 1);
 	if(!buf) return 0;
 
-	Pack &pack = packs[it->pack];
-
-	if(fseek(pack.fp, (long)it->data_off, SEEK_SET) ||
-	   (it->data_len && fread(buf, 1, it->data_len, pack.fp) != it->data_len))
+	if(!pack_read_eintrag(*it, buf))
 	{
 		ZLOG("Klang nicht lesbar: %s\n", name);
 		free(buf);

@@ -1,0 +1,90 @@
+ZOD ENGINE WARP @V@
+====================
+
+"Z" to strategia czasu rzeczywistego Bitmap Brothers (1996). Dowodzisz armią
+robotów, zdobywasz teren strefa po strefie i budujesz jednostki w zdobytych
+fabrykach.
+
+Zod Engine to otwarta reimplementacja "Z" autorstwa Nighsoft (GPLv3). Cego
+(AMIGAbench) przeniósł go na AmigaOS 3.2 z RTG: oryginalne ekrany ładowania
+i statystyki, wszystkie 63 filmy, muzyka. To jest wersja Warp tego portu:
+dostrojona do Amig z kartą Warp.
+
+
+WYMAGANIA
+---------
+
+  Komputer   Amiga 500 / 1200 / 3000 / 4000 z kartą Warp (Warp 560, 1240,
+             1260, 1260 Extreme, 7060) i procesorem 68060.
+             Testowane na: A1200 + Warp 1260 Extreme (68060, 100 MHz) oraz
+             A4000 + Warp 7060. Inne Amigi z 68060 i RTG uruchomią grę,
+             ale wolniej.
+  System     AmigaOS 3.2, Picasso96 (RTG karty Warp)
+  Pamięć     co najmniej 32 MB Fast RAM
+  MUI        3.8 lub nowsze, dla ZodLaunch (sama gra go nie potrzebuje)
+  Dźwięk     AHI albo Paula (audio.device); bez nich gra jest cicha
+  Dysk       ok. 25 MB, z filmami ok. 355 MB
+  Oraz       własna oryginalna płyta CD z "Z" - zobacz Install.txt
+
+Szybkość na Warp 1260 w 640x480: zwykle 35-70 klatek na sekundę; duże
+bitwy z ok. 200 robotami ok. 15.
+
+
+CO ZAWIERA
+----------
+
+  - grę (zod_060), okno ustawień ZodLaunch, ZExtract (czyta dane z płyty),
+    jvplay (odtwarza filmy)
+  - Original Z Story Mode: 35 oryginalnych map po kolei, filmy i ekran
+    statystyki po każdej rundzie
+  - ZodEngine Mode: własna lista map, drużyny i boty, bez filmów
+  - rozdzielczości od 640x480 do 1280x720
+
+
+ZODLAUNCH
+---------
+
+Kliknij dwa razy ZodLaunch, ustaw, naciśnij "Start". Ustawienia zapisują
+się przy starcie gry i przy zamknięciu okna.
+
+  Mode           Original Z Story Mode albo ZodEngine Mode
+  Resolution     od 640x480; większy ekran to mniej klatek na sekundę
+  Scaling        ogranicza rysowaną wielkość odłamków wybuchów (1,0 - 6,0)
+  Frame rate     liczba klatek na sekundę w lewym górnym rogu
+  Cutscenes      odtwarzanie filmów (gdy są w cuts/)
+  Music          wymaga music/MIDIBANK, zobacz Install.txt
+  Music output   AHI albo Paula
+  Binary         zod_060
+  Arguments      dodatkowe opcje gry, np. -L RAM:zod-log.txt
+
+
+W GRZE
+------
+
+  Strzałki, mysz przy krawędzi ekranu, minimapa   przewijanie
+  M                                               zwolnienie / złapanie myszy
+  Esc                                             koniec (z pytaniem);
+                                                  w czasie filmu: pominięcie
+  Przycisk "Menu" (prawy dolny róg)               menu gry; na jego dole
+                                                  numer wydania ("Warp @V@")
+
+
+ZGŁASZANIE BŁĘDÓW
+-----------------
+
+Na stronie projektu na GitHubie (Issues). Napisz:
+
+  - numer wydania: w menu gry ("Warp @V@"), w tytule okna ZodLaunch albo
+    w Shellu: Version Work:Games/ZOD/zod_060
+  - jaka Amiga, karta i rozdzielczość
+  - co zrobiłeś i co się stało
+  - log: w ZodLaunch w polu "Arguments" wpisz  -L RAM:zod-log.txt  i dołącz
+    plik RAM:zod-log.txt
+
+
+LICENCJA
+--------
+
+Zod Engine, port Cego i ta wersja są na licencji GPLv3 (doc/COPYING). Dane
+gry "Z" (grafika, dźwięki, filmy, muzyka) należą do Bitmap Brothers; nie
+są dołączone i pochodzą z Twojej płyty.

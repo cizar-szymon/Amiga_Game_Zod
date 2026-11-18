@@ -259,6 +259,8 @@ class QZOD_DNCLIENTSERVERSHARED_EXPORT ZPlayer : public ZClient
 		char lade_name[32];
 		int  lade_level;
 		bool lade_schirm_steht;
+		int lade_prozent_gezeigt;    /* Warp: zuletzt gezeigte Prozentzahl, -1 = keine */
+		void LadeProzent(int prozent); /* Warp: "LOADING xx%" auf dem Ladebild */
 
 		/* Zaehler fuer den Statistikbildschirm.
 		 *

@@ -1,0 +1,91 @@
+ZOD ENGINE WARP @V@
+====================
+
+"Z" is a real time strategy game by the Bitmap Brothers (1996). You command
+an army of robots, take the territory zone by zone and build units in the
+factories you capture.
+
+The Zod Engine is an open source re-implementation of "Z" by Nighsoft
+(GPLv3). Cego (AMIGAbench) ported it to AmigaOS 3.2 with RTG: original
+loading and statistics screens, all 63 films, music. This is the Warp
+build of that port: tuned for Amiga computers with a Warp card.
+
+
+WHAT YOU NEED
+-------------
+
+  Computer   Amiga 500 / 1200 / 3000 / 4000 with a Warp card (Warp 560,
+             1240, 1260, 1260 Extreme, 7060) and a 68060.
+             Tested on: A1200 + Warp 1260 Extreme (68060, 100 MHz) and
+             A4000 + Warp 7060. Other Amigas with a 68060 and RTG run the
+             game more slowly.
+  System     AmigaOS 3.2, Picasso96 (the Warp's RTG)
+  Memory     32 MB Fast RAM or more
+  MUI        3.8 or newer, for ZodLaunch (the game itself does not need it)
+  Sound      AHI or Paula (audio.device); without them the game is silent
+  Disk       about 25 MB, about 355 MB with the films
+  And        your own original CD of "Z" - see Install.txt
+
+Speed on a Warp 1260 at 640x480: usually 35-70 frames per second; large
+battles with about 200 robots about 15.
+
+
+WHAT IS IN IT
+-------------
+
+  - the game (zod_060), the settings window ZodLaunch, ZExtract (reads the
+    data from your CD), jvplay (plays the films)
+  - Original Z Story Mode: the 35 original maps in order, the films and the
+    statistics screen after every round
+  - ZodEngine Mode: your own map list, teams and bots, no films
+  - resolutions from 640x480 to 1280x720
+
+
+ZODLAUNCH
+---------
+
+Double-click ZodLaunch, set it up, press "Start". The settings are saved
+when you start the game and when you close the window.
+
+  Mode           Original Z Story Mode or ZodEngine Mode
+  Resolution     640x480 and up; larger screens cost frame rate
+  Scaling        caps the drawn size of explosion debris (1.0 - 6.0)
+  Frame rate     shows frames per second at the top left
+  Cutscenes      plays the films (when cuts/ holds them)
+  Music          needs music/MIDIBANK, see Install.txt
+  Music output   AHI or Paula
+  Binary         zod_060
+  Arguments      extra options for the game, e.g. -L RAM:zod-log.txt
+
+
+IN THE GAME
+-----------
+
+  Arrow keys, mouse at the screen edge, minimap   scroll
+  M                                               release / grab the mouse
+  Esc                                             quit (asks first);
+                                                  during a film: skip it
+  "Menu" button (bottom right)                    game menu; the release
+                                                  number is shown at its
+                                                  bottom ("Warp @V@")
+
+
+BUG REPORTS
+-----------
+
+Please report on the project's GitHub page (Issues). Write:
+
+  - the release number: in the game menu ("Warp @V@"), in the title of
+    ZodLaunch, or in a Shell: Version Work:Games/ZOD/zod_060
+  - your Amiga, card and resolution
+  - what you did and what happened
+  - the log: put  -L RAM:zod-log.txt  into "Arguments" in ZodLaunch and
+    attach RAM:zod-log.txt
+
+
+LICENCE
+-------
+
+The Zod Engine, Cego's port and this build are GPLv3 (doc/COPYING). The
+game data of "Z" (graphics, sounds, films, music) belongs to the Bitmap
+Brothers; it is not included and comes from your own CD.

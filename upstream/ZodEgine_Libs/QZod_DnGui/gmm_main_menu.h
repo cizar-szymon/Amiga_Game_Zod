@@ -18,6 +18,7 @@ public:
 	static gmm_warning_flag QuitWarningFlags();
 private:
 	GMMWButton menu_button[MAX_GMMMM_BUTTONS];
+	GMMWLabel version_label;      //Warp: Nummer der Ausgabe (port/zod_version.h)
 
 	void HandleWidgetEvent(int event_type, ZGMMWidget *event_widget);
 };

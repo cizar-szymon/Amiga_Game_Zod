@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fineclock.h"
+
 #ifdef __amigaos__
 #include <clib/debug_protos.h>
 #include <proto/dos.h>
@@ -11,6 +13,14 @@
 
 static int log_target = ZOD_LOG_STDOUT;
 static FILE *log_fp = 0;
+
+/* Warp (18.11.2026): ZOD_LOGZEIT -- jede Zeile der Protokolldatei beginnt mit
+ * den Millisekunden seit der ersten Protokollzeile (also seit Programmstart),
+ * "[  6115] ...". Gebraucht, um die Ladezeiten aufzuschluesseln; ohne den
+ * Schalter bleibt das Protokoll wie bisher. */
+static int log_zeit = 0;
+static int log_zeilenanfang = 1;
+static unsigned long log_t0 = 0;
 
 void zod_log_set(int target, const char *filename)
 {
@@ -23,6 +33,14 @@ void zod_log_set(int target, const char *filename)
 		log_fp = fopen(filename, "w");
 		if(!log_fp) log_target = ZOD_LOG_NONE;
 	}
+
+#ifdef __amigaos__
+	{
+		char var[8];
+
+		log_zeit = GetVar((CONST_STRPTR)"ZOD_LOGZEIT", (STRPTR)var, sizeof(var), 0) > 0;
+	}
+#endif
 }
 
 void zod_log_open_name(const char *target)
@@ -84,6 +102,20 @@ void zod_logv(const char *fmt, va_list ap)
 	case ZOD_LOG_FILE:
 		if(log_fp)
 		{
+			if(log_zeit)
+			{
+				size_t n = strlen(fmt);
+
+				if(log_zeilenanfang)
+				{
+					unsigned long proms = zod_fineclock_freq() / 1000;
+
+					fprintf(log_fp, "[%6lu] ", (zod_fineclock_ticks() - log_t0) / (proms ? proms : 1));
+				}
+
+				log_zeilenanfang = n && fmt[n - 1] == '\n';
+			}
+
 			vfprintf(log_fp, fmt, ap);
 			fflush(log_fp);
 		}
@@ -118,6 +150,8 @@ void zod_log(const char *fmt, ...)
 	va_list ap;
 
 	if(log_target == ZOD_LOG_NONE) return;
+
+	if(!log_t0) log_t0 = zod_fineclock_ticks();
 
 	va_start(ap, fmt);
 	zod_logv(fmt, ap);

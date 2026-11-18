@@ -93,6 +93,11 @@ void zod_schirm_zeiger(int an);
  * wechseln. */
 void zod_schirm_putzen(int x, int y, int b, int h);
 
+/* Warp: ein '%' (die Schrift des Originals hat keins) an x/y in
+ * BILDkoordinaten, so hoch wie die '0' des aktuellen Satzes, in deren
+ * Farbe mit Schatten. Rueckgabe: belegte Breite. */
+int zod_schirm_prozent(int x, int y);
+
 /* Schirmkoordinaten (Mausklick) in BILDkoordinaten umrechnen.
  *
  * Ohne das muesste jeder Aufrufer Skalierung und Zentrierung selbst

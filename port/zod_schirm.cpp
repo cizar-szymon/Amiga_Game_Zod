@@ -721,6 +721,104 @@ void zod_schirm_putzen(int x, int y, int b, int h)
 	if(SDL_MUSTLOCK(schirm)) SDL_UnlockSurface(schirm);
 }
 
+/* Warp (18.11.2026): ein '%' fuer die Prozentanzeige auf dem Ladebild.
+ *
+ * Die Schrift des Originals hat kein '%' (am Schirm gesehen: "LOADING 1").
+ * Gezeichnet wird es hier: so hoch wie die Ziffer '0' des aktuellen Satzes,
+ * in deren haeufigster Farbe, mit einem schwarzen Schatten eine Stelle
+ * rechts unten -- wie die Buchstaben daneben. Farben aus der Palette des
+ * Bildes. Rueckgabe: Breite in Bildpunkten (fuer die Zentrierung). */
+static void prozent_form(SDL_Surface *schirm, int x, int y, int h, Uint32 farbe)
+{
+	int b = h * 3 / 4, s = h / 4, i, k;
+
+	if(b < 4) b = 4;
+	if(s < 2) s = 2;
+
+	/* die beiden Kreise als kleine Kaestchen, dazwischen die Schraege */
+	for(i = 0; i < s; i++)
+		for(k = 0; k < s; k++)
+		{
+			punkt(schirm, letzt_x + (x + k) * letzt_f, letzt_y + (y + i) * letzt_f, farbe);
+			punkt(schirm, letzt_x + (x + b - s + k) * letzt_f,
+			      letzt_y + (y + h - s + i) * letzt_f, farbe);
+		}
+
+	for(i = 0; i < h; i++)
+	{
+		int px = x + (b - 1) - (i * (b - 1) + (h - 1) / 2) / (h - 1);
+
+		punkt(schirm, letzt_x + px * letzt_f, letzt_y + (y + i) * letzt_f, farbe);
+	}
+}
+
+int zod_schirm_prozent(int x, int y)
+{
+	SDL_Surface *schirm = SDL_GetVideoSurface();
+	SDL_Surface *g = glyphe('0');
+	int zaehl[256] = { 0 };
+	int h, gx, gy, best = 1, platz, dunkel;
+	Uint32 farbe, schatten;
+
+	if(!schirm || !g || !g->format->palette) return 0;
+
+	/* Hoehe = deckende Zeilen der '0', Farbe = ihr haeufigster Punkt */
+	{
+		int oben = -1, unten = -1;
+
+		for(gy = 0; gy < g->h; gy++)
+		{
+			const Uint8 *q = (const Uint8 *)g->pixels + gy * g->pitch;
+
+			for(gx = 0; gx < g->w; gx++)
+				if(q[gx])
+				{
+					zaehl[q[gx]]++;
+					if(oben < 0) oben = gy;
+					unten = gy;
+				}
+		}
+
+		if(oben < 0) return 0;
+
+		h = (unten - oben + 1) * schrift_skala;
+		y += oben * schrift_skala;
+	}
+
+	for(gx = 1; gx < 256; gx++)
+		if(zaehl[gx] > zaehl[best]) best = gx;
+
+	{
+		const SDL_Color &c = g->format->palette->colors[best];
+
+		platz = naechster_platz(&bild_palette, c.r, c.g, c.b);
+	}
+
+	dunkel = naechster_platz(&bild_palette, 0, 0, 0);
+
+	if(schirm->format->BitsPerPixel == 8)
+	{
+		farbe = (Uint32)platz;
+		schatten = (Uint32)dunkel;
+	}
+	else
+	{
+		farbe = SDL_MapRGB(schirm->format, bild_farben[platz].r,
+		                   bild_farben[platz].g, bild_farben[platz].b);
+		schatten = SDL_MapRGB(schirm->format, bild_farben[dunkel].r,
+		                      bild_farben[dunkel].g, bild_farben[dunkel].b);
+	}
+
+	if(SDL_MUSTLOCK(schirm)) SDL_LockSurface(schirm);
+
+	prozent_form(schirm, x + 1, y + 1, h, schatten);
+	prozent_form(schirm, x, y, h, farbe);
+
+	if(SDL_MUSTLOCK(schirm)) SDL_UnlockSurface(schirm);
+
+	return (h * 3 / 4 < 4 ? 4 : h * 3 / 4) + 1;
+}
+
 int zod_schirm_maus(int mx, int my, int *bx, int *by)
 {
 	int x = (mx - letzt_x) / (letzt_f > 0 ? letzt_f : 1);

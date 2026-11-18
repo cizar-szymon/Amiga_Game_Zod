@@ -16,6 +16,7 @@ TCHAR *optarg;
 #include <unistd.h>
 #endif
 
+#include "zod_version.h"
 #include <lib_qZod_DnSeparate/common.h>
 #include <lib_qZod_DnMap/qzod_map.h>
 #include <lib_qZod_DnSoundEngine/qzod_soundengine_old.h>
@@ -168,6 +169,9 @@ int main(int argc, char **argv)
     //AmigaOS: Arbeitsverzeichnis auf PROGDIR:, damit die relativen Pfade der
     //Engine auch beim Start von der Workbench stimmen (sonst wirkungslos)
     zod_amiga_startup();
+
+    /* Warp: Uhr der Ladezeiten im Protokoll starten (zplayer.cpp). */
+    { extern unsigned long zod_lade_ms(void); (void)zod_lade_ms(); }
     atexit(zod_amiga_shutdown);
 
     //Ziel der Textausgabe (ZOD_LOG: stdout, none, serial oder Dateiname)
@@ -210,6 +214,9 @@ int main(int argc, char **argv)
     //Logziel aus der Kommandozeile hat Vorrang vor der Umgebung
     if(starting_conditions.read_log_target)
         zod_log_open_name(starting_conditions.log_target.c_str());
+
+    /* Erste Zeile jedes Protokolls: welche Ausgabe das ist (port/zod_version.h). */
+    ZLOG("%s (%s)\n", ZOD_VERSION_TEXT, ZOD_VERSION_DATE);
 
     /* FEHLT DIE KARTENLISTE, WIRD HIER ABGEBROCHEN -- und zwar VOR dem
      * Bildschirm.
