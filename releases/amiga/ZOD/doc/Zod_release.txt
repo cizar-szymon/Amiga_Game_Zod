@@ -1,0 +1,32 @@
+ZOD ENGINE WARP - WYDANIA
+========================
+
+Bledy zglaszaj na stronie projektu na GitHubie (Issues), z numerem wydania
+(menu gry "Warp x.xx", tytul okna ZodLaunch albo "Version zod_060" w
+Shellu) i logiem (-L RAM:zod-log.txt w polu "Arguments" w ZodLaunch).
+
+
+0.12 (18.11.2026)
+-----------------
+
+  - Ekran ladowania pokazuje postep w procentach ("LOADING 37%").
+  - zod_040 dla 68040 (Warp 1240) obok zod_060; przy pierwszym starcie
+    ZodLaunch sam wybiera wersje dla procesora.
+  - Dane gry sa czytane duzymi blokami: od uruchomienia gry do pierwszej
+    mapy mija ok. 9 sekund na Warp 7060.
+
+
+0.11 (18.11.2026)
+-----------------
+
+Pierwsze wydanie wersji Warp.
+
+  - Obraz trafia prosto do pamieci karty Warp; przewijanie robi blitter
+    karty.
+  - Duze bitwy: ok. 15 klatek na sekunde przy 200 robotach na Warp 1260
+    (A1200).
+  - Original Z Story Mode ze wszystkimi filmami, ekranem statystyki i muzyka
+    (zestaw instrumentow z Aminetu, zobacz Install.txt).
+  - Gra dziala bez filmow, bez jvplay albo tylko z czescia filmow;
+    brakujace filmy sa pomijane.
+  - Numer wydania w menu gry, w ZodLaunch i w Version.

@@ -1,0 +1,80 @@
+ZOD ENGINE WARP 0.12 - DLA PROGRAMISTOW
+=======================================
+
+Zrodla: repozytorium projektu na GitHubie (GPLv3), galaz warp-060. Wersja
+Warp to port Zod Engine na AmigaOS autorstwa Cego ze zmianami dla kart
+Warp; kazda szybka sciezka ma tryb porownania ze starym kodem.
+
+
+BUDOWANIE
+---------
+
+Kompilator skrosny: m68k-amigaos-gcc bebbo (libnix, -noixemul).
+
+  make PLATFORM=amiga CPU=68060            gra: build/amiga/zod_060
+  make PLATFORM=amiga CPU=68040            to samo dla 68040: zod_040
+  make PLATFORM=amiga CPU=68060 launcher   ZodLaunch (potrzebne naglowki MUI)
+  make PLATFORM=amiga CPU=68060 jvplay     odtwarzacz filmow
+  make PLATFORM=amiga CPU=68060 extract    ZExtract
+  make PLATFORM=amiga CPU=68060 FASTMALLOC=0   bez wlasnego przydzialu
+                                               pamieci (build/amiga/zod_060nofm)
+  make hosttest                            testy na PC (Linux)
+
+Numer wydania jest tylko w port/zod_version.h; tools/release/make_release.sh
+sklada releases/amiga i odmawia, gdy $VER programu nie ma tego numeru.
+
+
+LOG
+---
+
+  zod_060 ... -L RAM:zod-log.txt     log do pliku (ZodLaunch: Arguments)
+  zod_060 ... -B 60                  pomiar: 60 s, potem liczba klatek
+                                     i podzial czasu klatki w logu
+  zod_060 -F on|off                  licznik klatek na ekranie
+
+
+PRZELACZNIKI TESTOWE (zmienne srodowiska, w Shellu Set NAZWA wartosc)
+-----------------------------------------------------------------------
+
+Tryby porownania - kazdy liczy szybka i stara droge obok siebie i zapisuje
+liczbe roznic w logu (ma byc 0):
+
+  ZOD_PEGRID 2        siatka celow (CheckPassiveEngage, CheckAttackTo)
+  ZOD_PFCHECK 1       lista otwarta A*: drzewo kontra szukanie liniowe
+  ZOD_PFFASTCHECK 1   cale drogi A*: szybka kontra stara
+  ZOD_PFTILECHECK 1   zwarte dane kafli
+  ZOD_MMCHECK 1       minimapa
+  ZOD_NEARCHECK 1     NearestObjectFromList
+  ZOD_SORTCACHE 2     pamiec sortowania list rysowania, wynik kontra
+                      stable_sort
+  ZOD_KLANGCHECK 1    dzwieki budynkow i odlamki pociskow
+  ZOD_INERTCHECK 1    nieruchome obiekty mapy w serwerze
+  ZOD_ROCKBAKE 2      wierzchy kamieni wpieczone w mape
+  ZOD_VERIFY 1        obraz odczytany z karty i porownany
+
+Przelaczniki:
+
+  ZOD_PEGRID aus      siatka celow wylaczona
+  ZOD_PFFAST aus      szybka droga sasiadow A* wylaczona
+  ZOD_PFBUDGET n      czas szukania drog na klatke w mikrosekundach
+                      (domyslnie 32000)
+  ZOD_ENDTEST "s f"   koniec kazdej rundy po s sekundach; f to kolejka
+                      s (wygrana) i n (przegrana) po kolei, np. "15 ns";
+                      mapy startuja bez "Click to Start"
+
+Pomiary:
+
+  ZOD_BENCHARMY n     n grup robotow na druzyne blisko srodka mapy
+  ZOD_BENCHFOLLOW 1   kamera co 8 s skacze na najwieksze skupisko
+  ZOD_BENCHSCROLL 1   kamera stale przewija
+
+Pozostale nazwy ZOD_* w zrodlach (grep zod_env) to pomoce pomiarowe
+pojedynczych krokow; sa opisane tam, gdzie sa czytane.
+
+
+POMIARY
+-------
+
+Mierzyc tylko na prawdziwej Amidze z karta Warp. Jeden odczyt ReadEClock
+kosztuje na Warp 1260 ok. 13 mikrosekund, wiec czasy czesci klatki w logu
+sa zawyzone; wiarygodne sa liczby klatek i srednie.

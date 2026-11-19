@@ -1,0 +1,95 @@
+ZOD ENGINE WARP 0.12
+====================
+
+"Z" ist ein Echtzeit-Strategiespiel der Bitmap Brothers (1996). Sie führen
+eine Armee von Robotern, erobern das Gelände Zone für Zone und bauen
+Einheiten in den eroberten Fabriken.
+
+Die Zod Engine ist eine quelloffene Neuumsetzung von "Z" von Nighsoft
+(GPLv3). Cego (AMIGAbench) hat sie auf AmigaOS 3.2 mit RTG portiert:
+originale Lade- und Statistikbilder, alle 63 Filme, Musik. Dies ist die
+Warp-Fassung dieser Portierung: abgestimmt auf Amigas mit Warp-Karte.
+
+
+VORAUSSETZUNGEN
+---------------
+
+  Rechner    Amiga 500 / 1200 / 3000 / 4000 mit Warp-Karte (Warp 560,
+             1240, 1260, 1260 Extreme, 7060): 68060, auf der Warp 1240
+             68040.
+             Getestet auf: A1200 + Warp 1260 Extreme (68060, 100 MHz) und
+             A4000 + Warp 7060. Andere Amigas mit 68040 oder 68060 und RTG
+             starten das Spiel, aber langsamer.
+  System     AmigaOS 3.2, Picasso96 (RTG der Warp-Karte)
+  Speicher   mindestens 32 MB Fast RAM
+  MUI        3.8 oder neuer, für ZodLaunch (das Spiel selbst braucht es nicht)
+  Klang      AHI oder Paula (audio.device); ohne beides bleibt das Spiel stumm
+  Platte     etwa 25 MB, mit den Filmen etwa 355 MB
+  Und        Ihre eigene Original-CD von "Z" - siehe Install.txt
+
+Geschwindigkeit auf einer Warp 1260 in 640x480: meist 35-70 Bilder pro
+Sekunde; große Schlachten mit etwa 200 Robotern etwa 15.
+
+
+INHALT
+------
+
+  - das Spiel (zod_060 für den 68060, zod_040 für den 68040), das
+    Einstellungsfenster ZodLaunch, ZExtract (liest
+    die Daten von der CD), jvplay (spielt die Filme)
+  - Original Z Story Mode: die 35 originalen Karten der Reihe nach, die
+    Filme und das Statistikbild nach jeder Runde
+  - ZodEngine Mode: eigene Kartenliste, Teams und Bots, keine Filme
+  - Auflösungen von 640x480 bis 1280x720
+
+
+ZODLAUNCH
+---------
+
+ZodLaunch doppelt anklicken, einstellen, "Start" drücken. Die Einstellungen
+werden beim Start des Spiels und beim Schließen des Fensters gespeichert.
+
+  Mode           Original Z Story Mode oder ZodEngine Mode
+  Resolution     ab 640x480; größere Bilder kosten Bildrate
+  Scaling        begrenzt die gezeichnete Größe von Explosionstrümmern
+                 (1,0 - 6,0)
+  Frame rate     Bilder pro Sekunde oben links
+  Cutscenes      spielt die Filme (wenn sie in cuts/ liegen)
+  Music          braucht music/MIDIBANK, siehe Install.txt
+  Music output   AHI oder Paula
+  Binary         zod_060 (68060) oder zod_040 (68040); beim ersten Start
+                 wählt ZodLaunch die Fassung für Ihren Prozessor
+  Arguments      weitere Optionen für das Spiel, z. B. -L RAM:zod-log.txt
+
+
+IM SPIEL
+--------
+
+  Pfeiltasten, Maus am Bildrand, Minikarte   scrollen
+  M                                          Maus freigeben / fangen
+  Esc                                        beenden (mit Rückfrage);
+                                             während eines Films: überspringen
+  Knopf "Menu" (unten rechts)                Spielmenü; unten darin steht
+                                             die Ausgabenummer ("Warp 0.12")
+
+
+FEHLERBERICHTE
+--------------
+
+Bitte auf der GitHub-Seite des Projekts (Issues). Angeben:
+
+  - die Ausgabenummer: im Spielmenü ("Warp 0.12"), im Titel von ZodLaunch
+    oder in der Shell: Version Work:Games/ZOD/zod_060
+  - Amiga, Karte und Auflösung
+  - was Sie getan haben und was geschah
+  - das Protokoll: in ZodLaunch unter "Arguments"  -L RAM:zod-log.txt
+    eintragen und die Datei RAM:zod-log.txt beilegen
+
+
+LIZENZ
+------
+
+Die Zod Engine, Cegos Portierung und diese Fassung stehen unter der GPLv3
+(doc/COPYING). Die Spieldaten von "Z" (Grafik, Klänge, Filme, Musik)
+gehören den Bitmap Brothers; sie sind nicht enthalten und kommen von
+Ihrer eigenen CD.

@@ -1,0 +1,199 @@
+Zod Engine Warp - Install / Instalacja / Installation
+
+  English ............ first
+  Polski ............. dalej (po angielskim)
+  Deutsch ............ am Ende
+
+
+########################################################################
+
+
+ZOD ENGINE WARP - INSTALLATION STEP BY STEP
+===========================================
+
+What you need: an Amiga with a 68060 and a Warp card (Picasso96 RTG),
+32 MB Fast RAM or more, AmigaOS 3.2, MUI 3.8 or newer for ZodLaunch -
+and your own original CD of "Z" (Bitmap Brothers, 1996).
+
+The archive contains the programs and the engine's own data only. The
+graphics, sounds, films and music of "Z" are read from YOUR CD.
+
+
+Step 1 - unpack the archive
+---------------------------
+
+  UnZip Zod-0.12.zip -d Work:Games
+
+This makes the drawer Work:Games/ZOD.
+
+
+Step 2 - read the game data from the CD (needed)
+------------------------------------------------
+
+Insert the CD of "Z" and type in a Shell:
+
+  CD Work:Games/ZOD
+  ZExtract CD0:
+
+Use the name of your CD drive instead of CD0: if it is different. ZExtract
+writes the graphics, sounds and loading screens into packs/ and the music
+notes into music/. It takes a few minutes.
+
+
+Step 3 - the films (optional, about 330 MB)
+-------------------------------------------
+
+  Copy CD0:CUTS/#? Work:Games/ZOD/cuts/
+
+Without the films the game runs the same, only without cutscenes.
+
+
+Step 4 - the music instruments (optional)
+-----------------------------------------
+
+The CD has only the notes of the music; the PC played them on the sound
+card's MIDI synthesizer. On the Amiga the game plays them with a bank of
+instrument samples. Download ADoom_Ins.lha from Aminet (game/shoot) - a
+General MIDI instrument set made for ADoom, nothing of Doom is in it - and
+type:
+
+  lha x ADoom_Ins.lha RAM:
+  Copy RAM:MIDI_Instruments Work:Games/ZOD/music/MIDIBANK
+
+Then tick "Music" in ZodLaunch. Without the bank the game plays its sound
+effects only.
+
+
+Step 5 - play
+-------------
+
+Double-click ZodLaunch and press "Start".
+
+
+########################################################################
+
+
+ZOD ENGINE WARP - INSTALACJA KROK PO KROKU
+==========================================
+
+Potrzebne: Amiga z 68060 i karta Warp (RTG Picasso96), co najmniej 32 MB
+Fast RAM, AmigaOS 3.2, MUI 3.8 lub nowsze dla ZodLaunch - oraz wlasna
+oryginalna plyta CD z gra "Z" (Bitmap Brothers, 1996).
+
+Archiwum zawiera tylko programy i wlasne dane silnika. Grafika, dzwieki,
+filmy i muzyka "Z" sa czytane z TWOJEJ plyty.
+
+
+Krok 1 - rozpakowanie archiwum
+------------------------------
+
+  UnZip Zod-0.12.zip -d Work:Games
+
+Powstaje szuflada Work:Games/ZOD.
+
+
+Krok 2 - dane gry z plyty (konieczne)
+-------------------------------------
+
+Wloz plyte "Z" i wpisz w Shellu:
+
+  CD Work:Games/ZOD
+  ZExtract CD0:
+
+Jesli naped ma inna nazwe niz CD0:, podaj jego nazwe. ZExtract zapisuje
+grafike, dzwieki i ekrany ladowania do packs/, a nuty muzyki do music/.
+Trwa to kilka minut.
+
+
+Krok 3 - filmy (opcjonalnie, ok. 330 MB)
+----------------------------------------
+
+  Copy CD0:CUTS/#? Work:Games/ZOD/cuts/
+
+Bez filmow gra dziala tak samo, tylko bez przerywnikow.
+
+
+Krok 4 - instrumenty muzyki (opcjonalnie)
+-----------------------------------------
+
+Na plycie sa tylko nuty muzyki; PC gral je syntezatorem MIDI karty
+dzwiekowej. Na Amidze gra odtwarza je z zestawu probek instrumentow.
+Pobierz z Aminetu ADoom_Ins.lha (game/shoot) - zestaw instrumentow General
+MIDI przygotowany dla ADoom, nie ma w nim nic z Dooma - i wpisz:
+
+  lha x ADoom_Ins.lha RAM:
+  Copy RAM:MIDI_Instruments Work:Games/ZOD/music/MIDIBANK
+
+Potem zaznacz "Music" w ZodLaunch. Bez zestawu gra odtwarza tylko efekty
+dzwiekowe.
+
+
+Krok 5 - gra
+------------
+
+Kliknij dwa razy ZodLaunch i nacisnij "Start".
+
+
+########################################################################
+
+
+ZOD ENGINE WARP - INSTALLATION SCHRITT FÜR SCHRITT
+==================================================
+
+Benötigt: ein Amiga mit 68060 und Warp-Karte (Picasso96-RTG), mindestens
+32 MB Fast RAM, AmigaOS 3.2, MUI 3.8 oder neuer für ZodLaunch - und Ihre
+eigene Original-CD von "Z" (Bitmap Brothers, 1996).
+
+Das Archiv enthält nur die Programme und die eigenen Daten der Engine.
+Grafik, Klänge, Filme und Musik von "Z" werden von IHRER CD gelesen.
+
+
+Schritt 1 - Archiv entpacken
+----------------------------
+
+  UnZip Zod-0.12.zip -d Work:Games
+
+Es entsteht die Schublade Work:Games/ZOD.
+
+
+Schritt 2 - Spieldaten von der CD lesen (notwendig)
+---------------------------------------------------
+
+CD von "Z" einlegen und in der Shell eingeben:
+
+  CD Work:Games/ZOD
+  ZExtract CD0:
+
+Heißt Ihr CD-Laufwerk anders als CD0:, geben Sie dessen Namen an.
+ZExtract schreibt Grafik, Klänge und Ladebilder nach packs/ und die Noten
+der Musik nach music/. Das dauert einige Minuten.
+
+
+Schritt 3 - die Filme (wahlweise, etwa 330 MB)
+----------------------------------------------
+
+  Copy CD0:CUTS/#? Work:Games/ZOD/cuts/
+
+Ohne die Filme läuft das Spiel genauso, nur ohne Zwischensequenzen.
+
+
+Schritt 4 - die Musikinstrumente (wahlweise)
+--------------------------------------------
+
+Auf der CD stehen nur die Noten der Musik; der PC spielte sie mit dem
+MIDI-Synthesizer der Soundkarte. Auf dem Amiga spielt das Spiel sie mit
+einer Bank von Instrumenten-Samples. Laden Sie ADoom_Ins.lha aus dem
+Aminet (game/shoot) - ein General-MIDI-Instrumentensatz für ADoom, von
+Doom selbst ist nichts darin - und geben Sie ein:
+
+  lha x ADoom_Ins.lha RAM:
+  Copy RAM:MIDI_Instruments Work:Games/ZOD/music/MIDIBANK
+
+Danach in ZodLaunch "Music" ankreuzen. Ohne die Bank spielt das Spiel nur
+die Klangeffekte.
+
+
+Schritt 5 - spielen
+-------------------
+
+ZodLaunch doppelt anklicken und "Start" drücken.
